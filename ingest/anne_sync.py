@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""Sync events, structured results, stages and attachment indexes from the ANNE API.
+
+Idempotent: existing snapshots are kept unless --force is given or the event
+is recent (events within REFRESH_DAYS of today are re-fetched, since results
+can still be corrected after publication).
+"""
+import argparse
+import json
+import sys
+import time
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, timedelta
+from pathlib import Path
+
+BASE = "https://anne-api.oefol.at/v1"
+HEADERS = {
+    "Accept": "application/json",
+    "User-Agent": "olresults-sync/0.1 (+https://github.com/josefhilbert/olresults)",
+}
+ROOT = Path(__file__).resolve().parent.parent
+RAW = ROOT / "data" / "raw" / "anne"
+REFRESH_DAYS = 30
+WORKERS = 6
+
+
+def get(url, retries=3):
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(url, headers=HEADERS)
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.load(resp)
+        except Exception:
+            if attempt == retries - 1:
+                raise
+            time.sleep(2 * (attempt + 1))
+
+
+def fetch_events():
+    events, page = [], 1
+    while True:
+        d = get(f"{BASE}/event?perPage=100&page={page}")
+        events.extend(d["data"])
+        if page >= d["meta"]["lastPage"]:
+            break
+        page += 1
+        time.sleep(0.2)
+    (RAW / "events.json").write_text(json.dumps(events, ensure_ascii=False))
+    print(f"events: {len(events)}")
+    return events
+
+
+def needs_fetch(path, event, force, refresh_cutoff):
+    if force or not path.exists():
+        return True
+    return (event.get("dateFrom") or "")[:10] >= refresh_cutoff
+
+
+def sync_event(event, force, refresh_cutoff):
+    eid = event["id"]
+    fetched = []
+    results_path = RAW / "results" / f"{eid}.json"
+    if event.get("hasOfficialResults") or event.get("hasUnofficialResults"):
+        if needs_fetch(results_path, event, force, refresh_cutoff):
+            results_path.write_text(json.dumps(get(f"{BASE}/event/{eid}/results"), ensure_ascii=False))
+            fetched.append("results")
+        if event.get("stageCount", 0) > 0:
+            stages_path = RAW / "stages" / f"{eid}.json"
+            if needs_fetch(stages_path, event, force, refresh_cutoff):
+                stages_path.write_text(json.dumps(get(f"{BASE}/event/{eid}/stages"), ensure_ascii=False))
+                fetched.append("stages")
+    return eid, fetched
+
+
+def sync_attachments(events, known, force):
+    """Fetch attachment indexes for past events not yet in attachments.json."""
+    today = date.today().isoformat()
+    todo = [e for e in events
+            if (e.get("dateFrom") or "9999")[:10] <= today
+            and (force or str(e["id"]) not in known)
+            and not (e.get("hasOfficialResults") or e.get("hasUnofficialResults"))]
+    print(f"attachment indexes to fetch: {len(todo)}")
+
+    def check(e):
+        d = get(f"{BASE}/event/{e['id']}/attachments")
+        res = [a for a in d if a.get("type") == "results"] if isinstance(d, list) else []
+        return str(e["id"]), [
+            {"url": a["url"], "fileName": a["fileName"], "mimeType": a["mimeType"]}
+            for a in res
+        ]
+
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        for fut in as_completed([ex.submit(check, e) for e in todo]):
+            eid, files = fut.result()
+            known[eid] = files
+    (RAW / "attachments.json").write_text(json.dumps(known, ensure_ascii=False))
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--force", action="store_true", help="re-fetch everything")
+    args = ap.parse_args()
+
+    (RAW / "results").mkdir(parents=True, exist_ok=True)
+    (RAW / "stages").mkdir(parents=True, exist_ok=True)
+
+    events = fetch_events()
+    refresh_cutoff = (date.today() - timedelta(days=REFRESH_DAYS)).isoformat()
+    today = date.today().isoformat()
+    past = [e for e in events if (e.get("dateFrom") or "9999")[:10] <= today]
+
+    with_results = [e for e in past
+                    if e.get("hasOfficialResults") or e.get("hasUnofficialResults")]
+    print(f"past events: {len(past)}, with structured results: {len(with_results)}")
+
+    fetched = 0
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        futs = [ex.submit(sync_event, e, args.force, refresh_cutoff) for e in with_results]
+        for fut in as_completed(futs):
+            eid, what = fut.result()
+            if what:
+                fetched += 1
+                if fetched % 50 == 0:
+                    print(f"  fetched {fetched}", flush=True)
+    print(f"result snapshots fetched/updated: {fetched}")
+
+    att_path = RAW / "attachments.json"
+    known = json.loads(att_path.read_text()) if att_path.exists() else {}
+    sync_attachments(events, known, force=False)
+    print("done")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
