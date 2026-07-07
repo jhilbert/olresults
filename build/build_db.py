@@ -150,8 +150,19 @@ class PersonRegistry:
         return pid
 
 
+def is_bewertung_clone(event):
+    """'Bewertung' events are ANNE's compensated/handicap-scoring view of a
+    race that's already ingested as its own event: same runners, same
+    times, same categories, just re-published under a second event id
+    (e.g. id 5511 'Bewertung - ... Langdistanz' duplicates stage 733 of
+    event 5301 row for row). They're not separate competitions and would
+    double-count every runner who ran the underlying race."""
+    return "bewertung" in (event.get("shortTitle") or "").lower()
+
+
 def load_events(cur):
-    events = {e["id"]: e for e in json.loads((RAW / "events.json").read_text())}
+    events = {e["id"]: e for e in json.loads((RAW / "events.json").read_text())
+              if not is_bewertung_clone(e)}
     for e in events.values():
         cur.execute(
             "INSERT INTO event VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
