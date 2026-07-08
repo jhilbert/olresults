@@ -509,6 +509,23 @@ def main():
         cur.execute("INSERT INTO person VALUES (?,?,?,?,?,?)",
                     (pid, name, key, yob, nat, iof))
 
+    # SportSoftware prints the national champion's rank ("1") on a separate
+    # "… österreichischer Meister" annotation line, so the winning row parses
+    # with no rank and the list appears to start at 2. Where a category has
+    # ranked finishers but none ranked 1, assign rank 1 to the fastest unranked
+    # finisher(s) — for a team/pair all members share the winning time.
+    cur.execute("""
+        UPDATE result SET rank = 1
+        WHERE status = 'ok' AND rank IS NULL AND time_s IS NOT NULL
+          AND (stage_id, category, time_s) IN (
+            SELECT r.stage_id, r.category, MIN(r.time_s)
+            FROM result r
+            WHERE r.status = 'ok'
+            GROUP BY r.stage_id, r.category
+            HAVING SUM(r.rank = 1) = 0 AND SUM(r.rank IS NOT NULL) > 0
+          )
+    """)
+
     # compute time_behind for legacy rows from winner time per category
     cur.execute("""
         UPDATE result SET time_behind_s = time_s - (
