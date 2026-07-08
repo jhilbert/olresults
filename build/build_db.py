@@ -95,6 +95,7 @@ def clean_name(name):
     Excel '#NAME?' import errors and a leading rank that some result layouts
     glue onto the name, with ('8 Robert') or without ('1Löwenstein') a space."""
     name = re.sub(r"^#NAME\?\s*", "", name.strip())
+    name = re.sub(r"^A\.?\s?K\.?\s+", "", name)  # 'A.K.' = außer Konkurrenz marker
     name = re.sub(r"^\([^)]*\)\s*", "", name)   # leading note, e.g. "(Csala) Judit Resch"
     m = re.match(r"^\d{1,3}\s+(\D.*)$", name) or re.match(r"^\d{1,3}([A-Za-zÀ-ÿ].*)$", name)
     if m:
@@ -374,6 +375,12 @@ def load_legacy_results(cur, events, persons, stage_ids, anne_event_ids):
             continue
         if eid in anne_event_ids:
             continue  # structured API data wins over legacy files
+        # team (Mannschaft) result lists give only member surnames + a club +
+        # a single team time — no first names, so members can't be resolved to
+        # individual runners (a surname+club match linked only ~17%). Keep them
+        # as one team-level row each; they're shown on event pages and excluded
+        # from the runner directory.
+        is_team = event.get("competitionType") == "team"
         sid = default_stage(cur, event, stage_ids)
         for cat in doc["categories"]:
             for r in cat["results"]:
@@ -389,6 +396,18 @@ def load_legacy_results(cur, events, persons, stage_ids, anne_event_ids):
                 if key in seen:
                     continue
                 seen.add(key)
+                # newer team tables are already split per member by the parser
+                # (resultKind=team, full names, note set). For the older surname-
+                # only roster format, a roster row is a run of >=3 surnames;
+                # 2-token "Lastname Firstname" rows are the individual (Einzel)
+                # categories these events also contain.
+                parser_kind = r.get("resultKind")
+                if parser_kind:
+                    kind, note = parser_kind, r.get("note")
+                elif is_team and len(name.split()) >= 3:
+                    kind, note = "team", "Mannschaft"
+                else:
+                    kind, note = "individual", r.get("note")
                 pid = persons.from_legacy(name, r.get("yearOfBirth"))
                 persons.record(pid, name)
                 insert_result(cur, stage_id=sid, person_id=pid, category=cat["name"],
@@ -398,8 +417,7 @@ def load_legacy_results(cur, events, persons, stage_ids, anne_event_ids):
                               course_length_m=cat.get("courseLengthM"),
                               course_climb_m=cat.get("courseClimbM"),
                               course_controls=cat.get("courseControls"),
-                              result_kind=r.get("resultKind", "individual"),
-                              note=r.get("note"), source=doc["source"])
+                              result_kind=kind, note=note, source=doc["source"])
                 n += 1
     return n
 

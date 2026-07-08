@@ -114,11 +114,40 @@ def parse_document(html_text):
                 continue
             # data row: align cells to columns
             rec = dict(zip([c or f"col{i}" for i, c in enumerate(columns)], row))
+            time_text = (rec.get("Zeit") or rec.get("Gesamt") or "").strip()
+            rank_ok = rec.get("Pl", "").strip().isdigit()
+
+            # newer team (Mannschaft) tables list members in separate
+            # "Name 1"/"Name 2"/… columns with full "Lastname, Firstname"
+            # names — emit one team result per member, matchable to profiles
+            member_cols = sorted(c for c in rec if re.match(r"Name ?\d", c))
+            if member_cols:
+                members = [re.sub(r"\s+", " ", rec[c].replace(",", " ")).strip()
+                           for c in member_cols if rec[c].strip()]
+                members = [m for m in members if not is_junk_name(m)]
+                if not members or (not rank_ok and not time_text):
+                    continue
+                club = (rec.get("Verein") or "").strip()
+                rank = int(rec["Pl"]) if rank_ok else None
+                secs = parse_time(time_text)
+                for nm in members:
+                    res = {"name": nm, "club": club, "timeText": time_text,
+                           "resultKind": "team",
+                           "note": "Mannschaft: " + club
+                                   + (" · mit " + ", ".join(o for o in members if o != nm)
+                                      if len(members) > 1 else "")}
+                    if rank is not None:
+                        res["rank"] = rank
+                    if secs is not None:
+                        res["timeS"], res["status"] = secs, "ok"
+                    else:
+                        res["status"] = parse_status(time_text) or "unknown"
+                    current["results"].append(res)
+                continue
+
             name = rec.get("Name", "").strip()
             if is_junk_name(name):
                 continue
-            time_text = (rec.get("Zeit") or rec.get("Gesamt") or "").strip()
-            rank_ok = rec.get("Pl", "").strip().isdigit()
             # club/spacer rows in split-time lists carry neither rank nor time
             if not rank_ok and not time_text:
                 continue
@@ -190,6 +219,12 @@ def main():
             data = fetch(f["url"], FILES / f"{eid}-{n}.html")
             text = decode(data)
             cats = parse_document(text)
+            if not cats and "<pre" in text.lower():
+                # some SportSoftware HTML wraps a fixed-width report in <pre>
+                # instead of a table (e.g. team/Mannschaft lists) — parse it
+                # with the fixed-width text logic
+                from parse_sportsoftware_text import extract_pre_blocks, parse_text
+                cats = parse_text(extract_pre_blocks(text))
             if not cats:
                 empty += 1
                 continue

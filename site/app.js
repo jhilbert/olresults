@@ -286,6 +286,7 @@ function viewRunners(letter) {
     runnersCache = query(`
       SELECT p.id, p.name, p.year_of_birth, COUNT(r.id) AS n
       FROM person p JOIN result r ON r.person_id = p.id
+      WHERE r.result_kind != 'team'   -- team rosters aren't individual runners
       GROUP BY p.id ORDER BY p.name COLLATE NOCASE`);
     for (const r of runnersCache) r.letter = firstLetter(r.name);
   }
