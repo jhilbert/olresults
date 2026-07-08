@@ -12,7 +12,16 @@ from pathlib import Path
 # any attachment on these domains regardless of its ANNE-assigned type; a
 # dedicated adapter or the fixed-width text parser decides what to do with it.
 # Extend as more are confirmed — we do not crawl all external result links.
-CLUB_LINK_ALLOWLIST = {"olc-wienerwald.at"}
+CLUB_LINK_ALLOWLIST = {"olc-wienerwald.at", "hsvwrn-ol.at"}
+
+# ANNE's own stored attachment URL is dead/wrong for these events (the
+# organizer's site was restructured; the historical page still exists, just
+# at a different address found via the site's own archive). Verified by hand:
+# exact event date matches the page's own printed date, and it contains real
+# results. {event_id: [(url, fileName), ...]}
+MANUAL_ATTACHMENT_OVERRIDES = {
+    1303: [("http://www.hsvwrn-ol.at/german/events/ergebnisse/2015/wintertour6.htm", "")],
+}
 
 CAT_RE = re.compile(r"^(?P<name>.+?)\s+\((?P<starters>\d+)\)\s*$")
 # same, but for formats (PDF, fixed-width text) where course info trails the
