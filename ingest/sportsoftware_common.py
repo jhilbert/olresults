@@ -111,6 +111,40 @@ def find_trailing_club(tokens, clubs):
     return None, tokens
 
 
+MEMBER_COL_RE = re.compile(r"^(?:name|l[äa]ufer|runner)\s*\d*$", re.I)
+
+
+def team_results_from_pairs(pairs, club, rank_text, time_text):
+    """Build one team result per member from ordered (header, value) column
+    pairs. Handles every SportSoftware team layout seen: 'Name 1/2/3',
+    'Name Läufer2 Läufer3', and three identical 'Name' headers (which a dict
+    would collapse). Returns None when it isn't a team row (fewer than two
+    member columns), so the caller falls back to the individual path."""
+    members = []
+    for header, val in pairs:
+        if MEMBER_COL_RE.match((header or "").strip()):
+            v = re.sub(r"\s+", " ", (val or "").replace(",", " ")).strip()
+            if v and not is_junk_name(v):
+                members.append(v)
+    if len(members) < 2:
+        return None
+    rank = int(rank_text) if rank_text.strip().isdigit() else None
+    secs = parse_time(time_text)
+    out = []
+    for nm in members:
+        others = ", ".join(o for o in members if o != nm)
+        res = {"name": nm, "club": club, "timeText": time_text, "resultKind": "team",
+               "note": "Mannschaft: " + club + (" · mit " + others if others else "")}
+        if rank is not None:
+            res["rank"] = rank
+        if secs is not None:
+            res["timeS"], res["status"] = secs, "ok"
+        else:
+            res["status"] = parse_status(time_text) or "unknown"
+        out.append(res)
+    return out
+
+
 def expand_pair_result(result):
     """If a parsed result's name holds a '/'-joined pair of clean two-token
     names (run-in-pairs events), return one result per runner sharing the

@@ -33,7 +33,7 @@ from pathlib import Path
 
 from sportsoftware_common import (
     CAT_LINE_RE, detect_list_type, expand_pair_result, is_junk_name,
-    parse_course_info, parse_status, parse_time,
+    parse_course_info, parse_status, parse_time, team_results_from_pairs,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -95,6 +95,9 @@ def parse_text(text):
     current = None
     labels = starts = None
 
+    # SportSoftware indents the champion row with a tab; expand tabs so the
+    # fixed-width columns line up with the header again
+    text = text.expandtabs()
     for line in text.split("\n"):
         if not line.strip():
             continue
@@ -118,12 +121,24 @@ def parse_text(text):
         if current is None or labels is None:
             continue
 
+        pairs = [(labels[i],
+                  line[starts[i]:(starts[i + 1] if i + 1 < len(starts) else len(line))].strip())
+                 for i in range(len(labels))]
         rec = slice_row(line, labels, starts)
+        time_text = (rec.get("Zeit") or rec.get("Gesamt") or "").strip()
+        rank_text = (rec.get("Pl") or "").strip().rstrip(".")
+
+        # team (Mannschaft) fixed-width lists: members across Name/Läufer2/… cols
+        if rank_text.isdigit() or time_text:
+            club = (rec.get("Verein") or "").strip()
+            team = team_results_from_pairs(pairs, club, rec.get("Pl", ""), time_text)
+            if team is not None:
+                current["results"].extend(team)
+                continue
+
         name = (rec.get("Name") or "").strip()
         if is_junk_name(name):
             continue
-        time_text = (rec.get("Zeit") or rec.get("Gesamt") or "").strip()
-        rank_text = (rec.get("Pl") or "").strip().rstrip(".")
         if not rank_text.isdigit() and not time_text:
             continue
 

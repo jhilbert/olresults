@@ -24,7 +24,7 @@ from pathlib import Path
 
 from sportsoftware_common import (
     CAT_RE, COURSE_RE, detect_list_type, expand_pair_result, is_junk_name,
-    parse_course_info, parse_status, parse_time,
+    parse_course_info, parse_status, parse_time, team_results_from_pairs,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -116,34 +116,16 @@ def parse_document(html_text):
             rec = dict(zip([c or f"col{i}" for i, c in enumerate(columns)], row))
             time_text = (rec.get("Zeit") or rec.get("Gesamt") or "").strip()
             rank_ok = rec.get("Pl", "").strip().isdigit()
+            club = (rec.get("Verein") or rec.get("Verein/Schule") or "").strip()
 
-            # newer team (Mannschaft) tables list members in separate
-            # "Name 1"/"Name 2"/… columns with full "Lastname, Firstname"
-            # names — emit one team result per member, matchable to profiles
-            member_cols = sorted(c for c in rec if re.match(r"Name ?\d", c))
-            if member_cols:
-                members = [re.sub(r"\s+", " ", rec[c].replace(",", " ")).strip()
-                           for c in member_cols if rec[c].strip()]
-                members = [m for m in members if not is_junk_name(m)]
-                if not members or (not rank_ok and not time_text):
+            # team (Mannschaft) tables: members across several columns
+            # (Name 1/2/3, Name Läufer2 Läufer3, or repeated 'Name' headers)
+            if rank_ok or time_text:
+                team = team_results_from_pairs(list(zip(columns, row)),
+                                               club, rec.get("Pl", ""), time_text)
+                if team is not None:
+                    current["results"].extend(team)
                     continue
-                club = (rec.get("Verein") or "").strip()
-                rank = int(rec["Pl"]) if rank_ok else None
-                secs = parse_time(time_text)
-                for nm in members:
-                    res = {"name": nm, "club": club, "timeText": time_text,
-                           "resultKind": "team",
-                           "note": "Mannschaft: " + club
-                                   + (" · mit " + ", ".join(o for o in members if o != nm)
-                                      if len(members) > 1 else "")}
-                    if rank is not None:
-                        res["rank"] = rank
-                    if secs is not None:
-                        res["timeS"], res["status"] = secs, "ok"
-                    else:
-                        res["status"] = parse_status(time_text) or "unknown"
-                    current["results"].append(res)
-                continue
 
             name = rec.get("Name", "").strip()
             if is_junk_name(name):
