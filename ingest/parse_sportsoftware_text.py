@@ -32,8 +32,9 @@ import urllib.request
 from pathlib import Path
 
 from sportsoftware_common import (
-    CAT_LINE_RE, COLUMN_ALIASES, detect_list_type, expand_pair_result, is_junk_name,
-    parse_course_info, parse_status, parse_time, parse_time_loose, team_results_from_pairs,
+    CAT_LINE_RE, CLUB_LINK_ALLOWLIST, COLUMN_ALIASES, detect_list_type,
+    expand_pair_result, is_junk_name, parse_course_info, parse_status,
+    parse_time, parse_time_loose, team_results_from_pairs,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -42,11 +43,7 @@ FILES = RAW / "files"
 OUT = ROOT / "data" / "normalized"
 
 HEADERS = {"User-Agent": "olresults-sync/0.1 (+https://github.com/josefhilbert/olresults)"}
-
-# Club domains verified to embed SportSoftware <pre> result text. Extend as
-# more are confirmed; text/link results outside this set are left for a
-# dedicated adapter rather than crawled blindly.
-LINK_DOMAIN_ALLOWLIST = {"olc-wienerwald.at"}
+LINK_DOMAIN_ALLOWLIST = CLUB_LINK_ALLOWLIST
 
 HEADER_RE = re.compile(r"^\s*Pl\b")
 TIME_COL_PAD = 6  # chars to widen the trailing time column leftward

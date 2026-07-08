@@ -6,6 +6,14 @@ import re
 from functools import lru_cache
 from pathlib import Path
 
+# Club domains verified to embed usable result pages (SportSoftware <pre>
+# exports, or a dedicated custom parser). ANNE sometimes mislabels the actual
+# results link on these domains (e.g. type "splittimes"), so anne_sync fetches
+# any attachment on these domains regardless of its ANNE-assigned type; a
+# dedicated adapter or the fixed-width text parser decides what to do with it.
+# Extend as more are confirmed — we do not crawl all external result links.
+CLUB_LINK_ALLOWLIST = {"olc-wienerwald.at"}
+
 CAT_RE = re.compile(r"^(?P<name>.+?)\s+\((?P<starters>\d+)\)\s*$")
 # same, but for formats (PDF, fixed-width text) where course info trails the
 # category on the same line: "H21-Wien (21) 7.8 km 280 Hm 27 P". Also tolerates
@@ -28,7 +36,7 @@ STATUS_MAP = {
     "fehlst": "mp", "fehlstempel": "mp",
     "disq": "dsq", "disqualifiziert": "dsq",
     "n. angetr.": "dns", "n.angetr.": "dns", "nicht angetreten": "dns",
-    "n ang": "dns",
+    "n ang": "dns", "nicht ang": "dns",
     "ohne wertung": "nc", "außer konkurrenz": "nc", "wertungsfrei": "nc",
     "dnf": "dnf", "dns": "dns", "dsq": "dsq", "mp": "mp",
 }

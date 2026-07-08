@@ -10,10 +10,14 @@ import json
 import re
 import sys
 import time
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from sportsoftware_common import CLUB_LINK_ALLOWLIST  # noqa: E402
 
 BASE = "https://anne-api.oefol.at/v1"
 HEADERS = {
@@ -105,9 +109,17 @@ def sync_attachments(events, known, force):
                  or has_unusable_structured_results(e["id"]))]
     print(f"attachment indexes to fetch: {len(todo)}")
 
+    def is_club_allowlisted(url):
+        return urllib.parse.urlparse(url).netloc.lower().replace("www.", "") in CLUB_LINK_ALLOWLIST
+
     def check(e):
         d = get(f"{BASE}/event/{e['id']}/attachments")
-        res = [a for a in d if a.get("type") == "results"] if isinstance(d, list) else []
+        if not isinstance(d, list):
+            return str(e["id"]), []
+        # ANNE sometimes mislabels the actual results page on a club-allowlisted
+        # domain (e.g. type "splittimes" for a page that's really the results),
+        # so accept any attachment there regardless of its assigned type
+        res = [a for a in d if a.get("type") == "results" or is_club_allowlisted(a.get("url", ""))]
         return str(e["id"]), [
             {"url": a["url"], "fileName": a["fileName"], "mimeType": a["mimeType"]}
             for a in res

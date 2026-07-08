@@ -383,7 +383,7 @@ def insert_anne_relay(cur, persons, sid, cat, team):
 
 def load_legacy_results(cur, events, persons, stage_ids, anne_event_ids):
     n = 0
-    canonical = re.compile(r"^\d+-\d+\.json$")
+    canonical = re.compile(r"^\d+-(?:club)?\d+\.json$")
     docs = [json.loads(p.read_text())
             for p in sorted(NORM.glob("*.json")) if canonical.match(p.name)]
     # plain result lists before split-time lists, so duplicates resolve
