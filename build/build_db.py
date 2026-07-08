@@ -393,7 +393,7 @@ def load_legacy_results(cur, events, persons, stage_ids, anne_event_ids):
     for doc in docs:
         eid = doc["eventId"]
         event = events.get(eid)
-        if not event or doc.get("listType") != "race":
+        if not event or doc.get("listType") not in ("race", "relay"):
             continue
         if eid in anne_event_ids:
             continue  # structured API data wins over legacy files

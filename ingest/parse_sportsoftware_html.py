@@ -23,9 +23,12 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from sportsoftware_common import (
-    CAT_RE, COURSE_RE, detect_list_type, expand_pair_result, is_junk_name,
-    parse_course_info, parse_status, parse_time, parse_time_loose, team_results_from_pairs,
+    CAT_RE, COURSE_RE, TIME_TOKEN_RE, detect_list_type, expand_pair_result,
+    is_junk_name, parse_course_info, parse_status, parse_time, parse_time_loose,
+    team_results_from_pairs,
 )
+
+ANNOT_RANK_RE = re.compile(r"(?i)meister|sieger")
 
 ROOT = Path(__file__).resolve().parent.parent
 RAW = ROOT / "data" / "raw" / "anne"
@@ -158,6 +161,116 @@ def parse_document(html_text):
     return [c for c in categories if c["results"]]
 
 
+def parse_relay_document(html_text):
+    """Parse a clean (non-split-times) SportSoftware relay result table:
+
+        Pl  Stnr  Staffel               Zeit    Zuschlag +
+            Name                        EPl     Zeit    WPl   W Zeit
+        1   und Österreichische Meister:in
+            82    OC Fürstenfeld OCFF1  37:33
+            Veitsberger Mateo           4       12:34   4     12:34
+            Eibel-Lenane Tara           4       13:48   2     26:22
+            Schmalhardt Matthias        1       11:11         37:33
+        2   88    SU Klagenfurt 1       38:32
+            ...
+
+    A team row starts with a rank (digit) in the first cell; member rows below
+    it have a blank first cell, the runner's name in the second, and their own
+    leg time in the fourth (constant across the 'Jg'/'Zeit' and
+    'EPl'/'Zeit'/'WPl'/'W Zeit' member-column variants seen). The champion is
+    sometimes announced on its own annotation row ('1  und ... Meister:in'),
+    which steals the rank from the real team row that follows with a blank
+    first cell — detected and re-attached here rather than left for the
+    generic per-category rank-1 fallback (which assumes individual, not team,
+    times)."""
+    ex = TableExtractor()
+    ex.feed(html_text)
+
+    categories = []
+    current = None
+    pending_team = None
+    pending_rank = None
+    staffel_idx = 2  # column holding the team name; some layouts omit 'Stnr',
+                     # shifting it from index 2 to 1 - detected from the header
+
+    def flush():
+        nonlocal pending_team
+        if not pending_team or not pending_team["members"]:
+            pending_team = None
+            return
+        names = [m["name"] for m in pending_team["members"]]
+        for i, m in enumerate(pending_team["members"]):
+            seconds = parse_time_loose(m["timeText"])
+            status = "ok" if seconds is not None else (parse_status(m["timeText"]) or "unknown")
+            mates = [n for n in names if n != m["name"]]
+            note_bits = [f"Staffel: {pending_team['name']}", f"Leg {i + 1}/{len(names)}"]
+            if mates:
+                note_bits.append("Team: " + ", ".join(mates))
+            result = {"name": m["name"], "club": pending_team["name"],
+                      "timeText": m["timeText"], "resultKind": "relay",
+                      "note": " · ".join(note_bits), "status": status}
+            if pending_team["rank"] is not None:
+                result["rank"] = pending_team["rank"]
+            if seconds is not None:
+                result["timeS"] = seconds
+            current["results"].append(result)
+        pending_team = None
+
+    for table in ex.tables:
+        for row in table:
+            if not row or all(c in ("", "&nbsp") for c in row):
+                continue
+            first = row[0].strip()
+            m = CAT_RE.match(first)
+            if m:
+                flush()
+                pending_rank = None
+                staffel_idx = 2
+                current = {"name": m.group("name").strip(),
+                           "declaredStarters": int(m.group("starters")), "results": []}
+                current.update(parse_course_info(" ".join(row[1:])))
+                categories.append(current)
+                continue
+            if current is None:
+                continue
+            if first == "Pl":
+                if "Staffel" in row:
+                    staffel_idx = row.index("Staffel")
+                continue  # outer header row
+            if not first and len(row) > 1 and row[1].strip() == "Name":
+                continue  # inner (member) header row
+
+            # champion annotation, either split across cells ('1' | 'und ...
+            # Meister:in') or as one cell ('1. und österr. Staatsmeister 2016')
+            annot_m = re.match(r"^(\d+)\.?\s", first) if not first.isdigit() else None
+            joined = " ".join(row) if annot_m else " ".join(row[1:])
+            if (first.isdigit() or annot_m) and ANNOT_RANK_RE.search(joined) \
+                    and not TIME_TOKEN_RE.search(joined):
+                flush()
+                pending_rank = int(first) if first.isdigit() else int(annot_m.group(1))
+                continue
+
+            if first.isdigit() or pending_rank is not None:
+                flush()
+                rank_val = int(first) if first.isdigit() else pending_rank
+                pending_rank = None
+                idx = staffel_idx if len(row) > staffel_idx else (len(row) - 1)
+                team_name = row[idx].strip() if idx >= 0 and row[idx] else ""
+                pending_team = {"rank": rank_val, "name": team_name, "members": []}
+                continue
+
+            if pending_team is None:
+                continue
+            name = row[1].strip() if len(row) > 1 else ""
+            if is_junk_name(name):
+                continue
+            leg_time = row[3].strip() if len(row) > 3 else ""
+            pending_team["members"].append({"name": name, "timeText": leg_time})
+
+    flush()
+    return [c for c in categories if c["results"]]
+
+
 def fetch(url, dest):
     if dest.exists():
         return dest.read_bytes()
@@ -200,13 +313,20 @@ def main():
         try:
             data = fetch(f["url"], FILES / f"{eid}-{n}.html")
             text = decode(data)
-            cats = parse_document(text)
-            if not cats and "<pre" in text.lower():
-                # some SportSoftware HTML wraps a fixed-width report in <pre>
-                # instead of a table (e.g. team/Mannschaft lists) — parse it
-                # with the fixed-width text logic
-                from parse_sportsoftware_text import extract_pre_blocks, parse_text
-                cats = parse_text(extract_pre_blocks(text))
+            list_type = detect_list_type(f["fileName"], text)
+            if list_type == "overall":
+                empty += 1  # split-times / cumulative-standings report: redundant, skip
+                continue
+            if list_type == "relay":
+                cats = parse_relay_document(text)
+            else:
+                cats = parse_document(text)
+                if not cats and "<pre" in text.lower():
+                    # some SportSoftware HTML wraps a fixed-width report in <pre>
+                    # instead of a table (e.g. team/Mannschaft lists) — parse it
+                    # with the fixed-width text logic
+                    from parse_sportsoftware_text import extract_pre_blocks, parse_text
+                    cats = parse_text(extract_pre_blocks(text))
             if not cats:
                 empty += 1
                 continue
