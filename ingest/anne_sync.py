@@ -7,6 +7,7 @@ can still be corrected after publication).
 """
 import argparse
 import json
+import re
 import sys
 import time
 import urllib.request
@@ -73,13 +74,35 @@ def sync_event(event, force, refresh_cutoff):
     return eid, fetched
 
 
+def has_unusable_structured_results(eid):
+    """Some events flagged hasOfficialResults=True actually carry garbage API
+    data (SI-card numbers as names like firstName='1212' lastName='605060', no
+    category, all disqualified — e.g. event 1127). Those never get an
+    attachment fallback otherwise, since they look 'already handled' by the
+    results flag. A name is unusable if it has no 2+ letter alphabetic run."""
+    path = RAW / "results" / f"{eid}.json"
+    if not path.exists():
+        return False
+    try:
+        rows = json.loads(path.read_text())
+    except Exception:
+        return False
+    if not rows or any(r.get("teamMembers") for r in rows):
+        return False  # empty, or a relay/team (handled via teamMembers)
+    name_re = re.compile(r"[A-Za-zÀ-ÿ]{2,}")
+    return not any(name_re.search(f"{r.get('firstName') or ''} {r.get('lastName') or ''}")
+                   for r in rows)
+
+
 def sync_attachments(events, known, force):
-    """Fetch attachment indexes for past events not yet in attachments.json."""
+    """Fetch attachment indexes for past events not yet in attachments.json,
+    plus events whose structured API results turned out to be unusable."""
     today = date.today().isoformat()
     todo = [e for e in events
             if (e.get("dateFrom") or "9999")[:10] <= today
             and (force or str(e["id"]) not in known)
-            and not (e.get("hasOfficialResults") or e.get("hasUnofficialResults"))]
+            and (not (e.get("hasOfficialResults") or e.get("hasUnofficialResults"))
+                 or has_unusable_structured_results(e["id"]))]
     print(f"attachment indexes to fetch: {len(todo)}")
 
     def check(e):

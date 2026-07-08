@@ -455,7 +455,22 @@ def main():
     persons = PersonRegistry()
     stage_ids = set()
 
-    anne_event_ids = {int(p.stem) for p in (RAW / "results").glob("*.json")}
+    def has_usable_names(path):
+        try:
+            rows = json.loads(path.read_text())
+        except Exception:
+            return False
+        if not rows or any(r.get("teamMembers") for r in rows):
+            return True  # empty, or a relay/team (handled via teamMembers)
+        return any(re.search(r"[A-Za-zÀ-ÿ]{2,}",
+                              f"{r.get('firstName') or ''} {r.get('lastName') or ''}")
+                   for r in rows)
+
+    # a few events flagged hasOfficialResults=True actually carry unusable API
+    # data (SI-card numbers as names, e.g. event 1127) — fall back to their
+    # legacy attachment instead of letting the empty/junk API snapshot win
+    anne_event_ids = {int(p.stem) for p in (RAW / "results").glob("*.json")
+                      if has_usable_names(p)}
     n_api = load_anne_results(cur, events, persons, stage_ids)
     n_legacy = load_legacy_results(cur, events, persons, stage_ids, anne_event_ids)
 
