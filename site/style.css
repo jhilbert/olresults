@@ -39,6 +39,15 @@ header {
 }
 .brand span { color: var(--accent); }
 
+.nav { display: flex; gap: 18px; }
+.nav a {
+  font-size: 14px; font-weight: 600; color: var(--ink-soft);
+  text-decoration: none; white-space: nowrap; padding: 4px 0;
+  border-bottom: 2px solid transparent; transition: color .15s, border-color .15s;
+}
+.nav a:hover { color: var(--ink); }
+.nav a.active { color: var(--accent-dark); border-bottom-color: var(--accent); }
+
 .search { position: relative; flex: 1; max-width: 440px; }
 .search input {
   width: 100%; padding: 8px 14px;
@@ -92,6 +101,29 @@ h2 { font-size: 17px; margin: 28px 0 10px; letter-spacing: -0.2px; }
 }
 .stat b { display: block; font-size: 22px; letter-spacing: -0.5px; }
 .stat span { color: var(--ink-soft); font-size: 12.5px; }
+a.stat { text-decoration: none; color: inherit; transition: border-color .15s, transform .1s; }
+a.stat:hover { border-color: var(--accent); }
+
+/* filter input + chips (year / letter navigation) */
+.filter {
+  width: 100%; max-width: 340px; padding: 8px 14px; margin-bottom: 14px;
+  border: 1px solid var(--line); border-radius: 999px; font-size: 14px;
+  background: var(--card); color: var(--ink); outline: none;
+}
+.filter:focus { border-color: var(--accent); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 18px; }
+.chips.letters { gap: 4px; }
+.chip {
+  font-size: 13px; font-weight: 600; color: var(--ink-soft);
+  text-decoration: none; padding: 4px 11px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--card); white-space: nowrap;
+  transition: all .12s;
+}
+.chip:hover { border-color: var(--accent); color: var(--ink); }
+.chip.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.chip span { opacity: .6; font-weight: 400; margin-left: 2px; }
+.chip.active span { opacity: .85; }
+.chips.letters .chip { min-width: 30px; text-align: center; padding: 4px 8px; }
 
 /* tables */
 table { width: 100%; border-collapse: collapse; background: var(--card);

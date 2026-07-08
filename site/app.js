@@ -62,8 +62,8 @@ function viewHome() {
     <p class="sub">Ergebnisarchiv österreichischer OL-Wettkämpfe — Läuferprofile, Kategorien, Zeitrückstände.</p>
     <div class="stats">
       <div class="stat"><b>${s.results.toLocaleString("de-AT")}</b><span>Ergebnisse</span></div>
-      <div class="stat"><b>${s.persons.toLocaleString("de-AT")}</b><span>Läufer:innen</span></div>
-      <div class="stat"><b>${s.events.toLocaleString("de-AT")}</b><span>Wettkämpfe</span></div>
+      <a class="stat" href="#/runners"><b>${s.persons.toLocaleString("de-AT")}</b><span>Läufer:innen</span></a>
+      <a class="stat" href="#/events"><b>${s.events.toLocaleString("de-AT")}</b><span>Wettkämpfe</span></a>
     </div>
     <h2>Neueste Ergebnisse</h2>
     <table>
@@ -228,15 +228,114 @@ function setupSearch() {
   dropdown.addEventListener("click", () => { dropdown.hidden = true; input.value = ""; });
 }
 
+/* ---------- all events (Wettkämpfe) ---------- */
+
+function viewEvents(year) {
+  const events = query(`
+    SELECT e.id, e.title, e.location,
+           COALESCE(MIN(s.date), e.date_from) AS date,
+           COUNT(r.id) AS n
+    FROM event e JOIN stage s ON s.event_id = e.id JOIN result r ON r.stage_id = s.id
+    GROUP BY e.id ORDER BY date DESC`);
+  const years = query(`
+    SELECT substr(COALESCE(s.date, e.date_from), 1, 4) AS yr, COUNT(DISTINCT e.id) AS n
+    FROM event e JOIN stage s ON s.event_id = e.id JOIN result r ON r.stage_id = s.id
+    GROUP BY yr ORDER BY yr DESC`);
+
+  const shown = year ? events.filter((e) => (e.date || "").startsWith(year)) : events;
+  const chip = (val, label, n) =>
+    `<a class="chip ${(!year && !val) || year === val ? "active" : ""}"
+        href="#/events${val ? "/" + val : ""}">${label}${n != null ? ` <span>${n}</span>` : ""}</a>`;
+
+  app.innerHTML = `
+    <h1>Wettkämpfe</h1>
+    <p class="sub">${events.length.toLocaleString("de-AT")} Wettkämpfe mit Ergebnissen${year ? ` · ${shown.length} in ${year}` : ""}.</p>
+    <div class="chips">
+      ${chip(null, "Alle", events.length)}
+      ${years.map((y) => chip(y.yr, y.yr, y.n)).join("")}
+    </div>
+    <table>
+      <thead><tr><th>Datum</th><th>Wettkampf</th><th class="hide-sm">Ort</th><th class="num">Ergebnisse</th></tr></thead>
+      <tbody>${shown.map((e) => `
+        <tr>
+          <td class="dim">${fmtDate(e.date)}</td>
+          <td><a href="#/event/${e.id}">${esc(e.title)}</a></td>
+          <td class="hide-sm dim">${esc(e.location || "")}</td>
+          <td class="num">${e.n}</td>
+        </tr>`).join("")}
+      </tbody>
+    </table>`;
+}
+
+/* ---------- all runners (Läufer:innen) ---------- */
+
+let runnersCache = null;
+
+function firstLetter(name) {
+  const c = (name.trim()[0] || "").toUpperCase()
+    .normalize("NFD").replace(/[̀-ͯ]/g, "");  // fold diacritics: Š→S, Á→A
+  return /[A-Z]/.test(c) ? c : "#";
+}
+
+function viewRunners(letter) {
+  if (!runnersCache) {
+    runnersCache = query(`
+      SELECT p.id, p.name, p.year_of_birth, COUNT(r.id) AS n
+      FROM person p JOIN result r ON r.person_id = p.id
+      GROUP BY p.id ORDER BY p.name COLLATE NOCASE`);
+    for (const r of runnersCache) r.letter = firstLetter(r.name);
+  }
+  const letters = [...new Set(runnersCache.map((r) => r.letter))]
+    .sort((a, b) => (a === "#") - (b === "#") || a.localeCompare(b));  // "#" last
+  const active = letter && letters.includes(letter) ? letter : letters[0];
+  const list = runnersCache.filter((r) => r.letter === active);
+
+  const rowsHtml = (rows) => rows.map((r) => `
+    <tr>
+      <td><a href="#/runner/${r.id}">${esc(r.name)}</a></td>
+      <td class="num dim">${r.year_of_birth || ""}</td>
+      <td class="num">${r.n}</td>
+    </tr>`).join("");
+
+  app.innerHTML = `
+    <h1>Läufer:innen</h1>
+    <p class="sub">${runnersCache.length.toLocaleString("de-AT")} Läufer:innen. Nach Name suchen oder Anfangsbuchstaben wählen.</p>
+    <input id="runner-filter" class="filter" type="search" placeholder="Name filtern …" autocomplete="off">
+    <div class="chips letters">
+      ${letters.map((l) => `<a class="chip ${l === active ? "active" : ""}" href="#/runners/${l}">${l}</a>`).join("")}
+    </div>
+    <table>
+      <thead><tr><th>Name</th><th class="num">Jg</th><th class="num">Starts</th></tr></thead>
+      <tbody id="runner-rows">${rowsHtml(list)}</tbody>
+    </table>`;
+
+  const input = document.getElementById("runner-filter");
+  const tbody = document.getElementById("runner-rows");
+  input.addEventListener("input", () => {
+    const q = input.value.trim().toLowerCase();
+    if (!q) { tbody.innerHTML = rowsHtml(list); return; }
+    const matches = runnersCache.filter((r) => r.name.toLowerCase().includes(q)).slice(0, 300);
+    tbody.innerHTML = matches.length ? rowsHtml(matches)
+      : `<tr><td colspan="3" class="dim">Keine Treffer</td></tr>`;
+  });
+}
+
 /* ---------- routing & boot ---------- */
+
+function setActiveNav(name) {
+  document.querySelectorAll(".nav a").forEach((a) =>
+    a.classList.toggle("active", a.dataset.nav === name));
+}
 
 function route() {
   if (!db) return;
   const hash = location.hash || "#/";
   let m;
-  if ((m = hash.match(/^#\/runner\/(-?\d+)/))) viewRunner(Number(m[1]));
-  else if ((m = hash.match(/^#\/event\/(\d+)/))) viewEvent(Number(m[1]));
-  else viewHome();
+  if ((m = hash.match(/^#\/runner\/(-?\d+)/))) { viewRunner(Number(m[1])); setActiveNav(); }
+  else if ((m = hash.match(/^#\/event\/(\d+)/))) { viewEvent(Number(m[1])); setActiveNav(); }
+  else if ((m = hash.match(/^#\/events(?:\/(\d{4}))?/))) { viewEvents(m[1]); setActiveNav("events"); }
+  else if ((m = hash.match(/^#\/runners(?:\/([A-Z#]))?/))) { viewRunners(m[1]); setActiveNav("runners"); }
+  else { viewHome(); setActiveNav(); }
   window.scrollTo(0, 0);
 }
 
