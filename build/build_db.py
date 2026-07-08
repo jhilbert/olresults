@@ -120,6 +120,18 @@ ANNOTATION_RE = re.compile(
 INVALID_NAME_CHARS = set("<>={}[]|;#&%\\/?*")
 
 
+def reorder_first_last(name, first_names):
+    """SportSoftware exports use 'Lastname Firstname'; flip a two-token name to
+    'Firstname Lastname' when the second token is a known first name and the
+    first token isn't (so 'Radon Livia' -> 'Livia Radon', 'Thomas Radon' kept)."""
+    toks = name.split()
+    if len(toks) == 2:
+        a, b = toks
+        if b.lower() in first_names and a.lower() not in first_names:
+            return f"{b} {a}"
+    return name
+
+
 def is_valid_name(name):
     """Reject non-person artifacts: score-O course lines, header/title
     fragments, relay bib strings, championship annotations, leaked HTML, etc."""
@@ -153,15 +165,21 @@ class PersonRegistry:
         self.by_key = {}     # (name_key, yob) -> pid
         self.by_name = {}    # name_key -> [pid, ...], insertion order, no dupes
         self.name_seen = defaultdict(Counter)  # pid -> Counter(name -> occurrences)
+        self.name_auth = defaultdict(Counter)  # pid -> Counter of API-form names
+        self.first_names = set()               # lowercased firstNames from the API
         self.next_synthetic = -1
 
-    def record(self, pid, name):
-        """Track every spelling of a name seen for a person so the display
-        name can later be set to the most frequent one. ANNE sometimes ties
-        one userId to several names — typos ('Erich'/'Erik'), maiden/married
-        names, or outright data errors mixing two people; showing the
-        majority name keeps the common case correct."""
+    def record(self, pid, name, authoritative=False):
+        """Track every spelling of a name seen for a person so the display name
+        can later be set to the most frequent one. ANNE sometimes ties one
+        userId to several names — typos ('Erich'/'Erik'), maiden/married names,
+        or data errors mixing two people; the majority keeps the common case
+        right. `authoritative` marks names composed from the API's explicit
+        firstName + lastName (reliably 'First Last' order), which win over the
+        'Lastname Firstname' spellings SportSoftware exports use."""
         self.name_seen[pid][name] += 1
+        if authoritative:
+            self.name_auth[pid][name] += 1
 
     def _new(self, name, yob, nationality=None, iof_id=None, pid=None):
         if pid is None:
@@ -303,7 +321,9 @@ def load_anne_results(cur, events, persons, stage_ids):
                                         r.get("nationality"), r.get("iofId"))
             else:
                 pid = persons.from_legacy(name, r.get("yearOfBirth"))
-            persons.record(pid, name)
+            if r.get("firstName"):
+                persons.first_names.add(r["firstName"].strip().lower())
+            persons.record(pid, name, authoritative=bool(r.get("firstName") and r.get("lastName")))
             course = r.get("course") or {}
             insert_result(cur, stage_id=sid, person_id=pid, category=cat,
                           category_full=r.get("categoryTitle"), club=r.get("clubName"),
@@ -342,7 +362,9 @@ def insert_anne_relay(cur, persons, sid, cat, team):
         if not nm:
             continue
         pid = persons.from_legacy(nm, None)
-        persons.record(pid, nm)
+        if m.get("firstName"):
+            persons.first_names.add(m["firstName"].strip().lower())
+        persons.record(pid, nm, authoritative=bool(m.get("firstName") and m.get("lastName")))
         mates = [o for o in names if o and o != nm]
         note_bits = [f"Staffel: {team_name}".strip(),
                      f"Leg {m.get('leg')}/{len(members)}"]
@@ -491,8 +513,11 @@ def main():
         return pid
 
     final_names = defaultdict(Counter)
+    final_auth = defaultdict(Counter)
     for pid, counts in persons.name_seen.items():
         final_names[resolve(pid)].update(counts)
+    for pid, counts in persons.name_auth.items():
+        final_auth[resolve(pid)].update(counts)
 
     for old in list(merge_map):
         new = resolve(old)
@@ -500,11 +525,16 @@ def main():
         persons.by_id.pop(old, None)
 
     for pid, (name, key, yob, nat, iof) in persons.by_id.items():
-        # display the most frequently seen spelling (ANNE ties some userIds
-        # to several names; the majority keeps the common case right)
+        # prefer the API's authoritative 'First Last' spelling; otherwise the
+        # most-frequent spelling, flipped to 'First Last' when it's a legacy
+        # 'Lastname Firstname' form we can recognise
+        auth = final_auth.get(pid)
         counts = final_names.get(pid)
-        if counts:
-            name = counts.most_common(1)[0][0]
+        if auth:
+            name = auth.most_common(1)[0][0]
+            key = name_key(name)
+        elif counts:
+            name = reorder_first_last(counts.most_common(1)[0][0], persons.first_names)
             key = name_key(name)
         cur.execute("INSERT INTO person VALUES (?,?,?,?,?,?)",
                     (pid, name, key, yob, nat, iof))
