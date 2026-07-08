@@ -86,6 +86,52 @@ def name_key(name):
     return " ".join(sorted(re.findall(r"[a-zäöüß]+", n)))
 
 
+def clean_name(name):
+    """Strip artifacts that leaked into the name column across sources, so the
+    same runner isn't fragmented into separate identities per race. Handles
+    Excel '#NAME?' import errors and a leading rank that some result layouts
+    glue onto the name, with ('8 Robert') or without ('1Löwenstein') a space."""
+    name = re.sub(r"^#NAME\?\s*", "", name.strip())
+    name = re.sub(r"^\([^)]*\)\s*", "", name)   # leading note, e.g. "(Csala) Judit Resch"
+    m = re.match(r"^\d{1,3}\s+(\D.*)$", name) or re.match(r"^\d{1,3}([A-Za-zÀ-ÿ].*)$", name)
+    if m:
+        name = m.group(1).strip()
+    # PDF extraction sometimes splits the first letter off ("A lexander Grill")
+    name = re.sub(r"^([A-ZÀ-Þ]) ([a-zà-ÿ])", r"\1\2", name)
+    return name
+
+
+# SportSoftware appends championship/title notes ("... und Österreichischer
+# Meister") that some layouts drop onto their own line; misparsed category or
+# event-title lines also surface. Both are non-persons.
+ANNOTATION_RE = re.compile(
+    r"(?i)(^&|^und\b|\bcup\b|\b(19|20)\d\d\b|"
+    r"(staats|sprint|österr|öster|nieder|steir|kärnt|tirol|salzb|vorarl|"
+    r"burgenl|wr\.?|nö|wien|jugend|schüler)\w*\.?\s*(sprint)?meister)")
+
+
+# Characters that never occur in a real person name but do in the various
+# parser failure modes: HTML markup (<>=;{}), relay separators (/), score/
+# placeholder junk (#&%|?*).
+INVALID_NAME_CHARS = set("<>={}[]|;#&%\\/?*")
+
+
+def is_valid_name(name):
+    """Reject non-person artifacts: score-O course lines, header/title
+    fragments, relay bib strings, championship annotations, leaked HTML, etc."""
+    if not re.search(r"[A-Za-zÀ-ÿ]{2,}", name):
+        return False
+    if re.match(r"^[\d+\-.,]", name):        # real names don't start digit/punct
+        return False
+    if any(c in INVALID_NAME_CHARS for c in name):
+        return False
+    if re.search(r"\d,\d{3}|\bkm\b", name):  # "4,950", "2,250 km" course artifacts
+        return False
+    if ANNOTATION_RE.search(name):
+        return False
+    return True
+
+
 class PersonRegistry:
     """Identity resolution across sources.
 
@@ -215,11 +261,10 @@ def load_anne_results(cur, events, persons, stage_ids):
                 if priority.get(r.get("resultType"), 3)
                 == best[(r.get("eventStageId"), r.get("categoryShortTitle"))]]
         for r in rows:
-            name = f"{r.get('firstName') or ''} {r.get('lastName') or ''}".strip()
+            name = clean_name(f"{r.get('firstName') or ''} {r.get('lastName') or ''}".strip())
             # team rows (relays) need team/leg modelling — skipped for now;
             # some old imports carry bib/SI numbers or 'empty' placeholders
-            if not name or re.match(r"^[\d\s:.,()/-]*$", name) \
-                    or "empty" in name.lower():
+            if not is_valid_name(name) or "empty" in name.lower():
                 continue
             uid = r.get("userId")
             if uid:
@@ -266,11 +311,14 @@ def load_legacy_results(cur, events, persons, stage_ids, anne_event_ids):
             for r in cat["results"]:
                 if r.get("status") == "dns":
                     continue
-                key = (sid, cat["name"], name_key(r["name"]))
+                name = clean_name(r["name"])
+                if not is_valid_name(name):
+                    continue
+                key = (sid, cat["name"], name_key(name))
                 if key in seen:
                     continue
                 seen.add(key)
-                pid = persons.from_legacy(r["name"], r.get("yearOfBirth"))
+                pid = persons.from_legacy(name, r.get("yearOfBirth"))
                 cur.execute(
                     "INSERT INTO result (stage_id, person_id, category, category_full,"
                     " club, rank, status, time_s, time_behind_s, out_of_competition,"
