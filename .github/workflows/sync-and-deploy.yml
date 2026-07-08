@@ -35,6 +35,7 @@ jobs:
           python3 ingest/anne_sync.py
           python3 ingest/parse_sportsoftware_html.py
           python3 ingest/parse_sportsoftware_pdf.py
+          python3 ingest/parse_sportsoftware_text.py
 
       - name: Commit new snapshots
         if: github.event_name != 'push'

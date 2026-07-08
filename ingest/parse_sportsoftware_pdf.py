@@ -31,7 +31,10 @@ import urllib.request
 import warnings
 from pathlib import Path
 
-from sportsoftware_common import detect_list_type, is_junk_name, parse_course_info, parse_status, parse_time
+from sportsoftware_common import (
+    CAT_LINE_RE, detect_list_type, is_junk_name, parse_course_info,
+    parse_status, parse_time,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 RAW = ROOT / "data" / "raw" / "anne"
@@ -40,7 +43,6 @@ OUT = ROOT / "data" / "normalized"
 
 HEADERS = {"User-Agent": "olresults-sync/0.1 (+https://github.com/josefhilbert/olresults)"}
 
-CAT_LINE_RE = re.compile(r"^(?P<name>.+?)\s+\((?P<starters>\d+)\)\s*(?P<rest>.*)$")
 CONTINUATION_RE = re.compile(r"^\(Forts\.?\)$", re.I)
 RANK_LEAK_RE = re.compile(r"^(\d{1,3})\s+(\S.*)$")
 LINE_TOLERANCE = 3  # px, for clustering words into the same visual line

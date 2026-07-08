@@ -4,6 +4,9 @@ OEScore) result exports, used by both the HTML and PDF adapters.
 import re
 
 CAT_RE = re.compile(r"^(?P<name>.+?)\s+\((?P<starters>\d+)\)\s*$")
+# same, but for formats (PDF, fixed-width text) where course info trails the
+# category on the same line: "H21-Wien (21) 7.8 km 280 Hm 27 P"
+CAT_LINE_RE = re.compile(r"^(?P<name>.+?)\s+\((?P<starters>\d+)\)\s*(?P<rest>.*)$")
 COURSE_RE = re.compile(r"(?:(?P<km>[\d.,]+)\s*km)?\s*(?:(?P<climb>\d+)\s*Hm)?")
 CONTROLS_RE = re.compile(r"(\d+)\s*P\b")
 TIME_RE = re.compile(r"^(?:(\d+):)?(\d{1,2}):(\d{2})$")
