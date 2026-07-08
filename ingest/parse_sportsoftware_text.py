@@ -32,7 +32,7 @@ import urllib.request
 from pathlib import Path
 
 from sportsoftware_common import (
-    CAT_LINE_RE, detect_list_type, expand_pair_result, is_junk_name,
+    CAT_LINE_RE, COLUMN_ALIASES, detect_list_type, expand_pair_result, is_junk_name,
     parse_course_info, parse_status, parse_time, parse_time_loose, team_results_from_pairs,
 )
 
@@ -103,6 +103,7 @@ def parse_text(text):
             continue
         if HEADER_RE.match(line) and "Name" in line:
             labels, starts = parse_columns(line)
+            labels = [COLUMN_ALIASES.get(l, l) for l in labels]
             starts = column_bounds(labels, starts)
             continue
 

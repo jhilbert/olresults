@@ -8,8 +8,14 @@ from pathlib import Path
 
 CAT_RE = re.compile(r"^(?P<name>.+?)\s+\((?P<starters>\d+)\)\s*$")
 # same, but for formats (PDF, fixed-width text) where course info trails the
-# category on the same line: "H21-Wien (21) 7.8 km 280 Hm 27 P"
-CAT_LINE_RE = re.compile(r"^(?P<name>.+?)\s+\((?P<starters>\d+)\)\s*(?P<rest>.*)$")
+# category on the same line: "H21-Wien (21) 7.8 km 280 Hm 27 P". Also tolerates
+# a "(finished/entered" count and a missing close paren, as in "Ultimate (35/
+# Preliminary results 21:45".
+CAT_LINE_RE = re.compile(r"^(?P<name>.+?)\s+\((?P<starters>\d+)(?:/\d*)?\)?\s*(?P<rest>.*)$")
+
+# English-locale SportSoftware exports use different column headers
+COLUMN_ALIASES = {"Time": "Zeit", "Club": "Verein", "YB": "Jg",
+                  "Stno": "Stnr", "Runner": "Name", "Pos": "Pl", "Place": "Pl"}
 COURSE_RE = re.compile(r"(?:(?P<km>[\d.,]+)\s*km)?\s*(?:(?P<climb>\d+)\s*Hm)?")
 CONTROLS_RE = re.compile(r"(\d+)\s*P\b")
 TIME_RE = re.compile(r"^(?:(\d+):)?(\d{1,2}):(\d{2})$")
