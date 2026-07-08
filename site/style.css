@@ -153,6 +153,7 @@ td a:hover { color: var(--accent-dark); }
   padding: 1px 7px; background: #f5f0ec; color: var(--ink-soft);
   text-transform: uppercase; letter-spacing: .04em;
 }
+.note { font-size: 12px; color: var(--ink-faint); margin-top: 2px; }
 
 .cat-block { margin-bottom: 26px; }
 .cat-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 8px; }

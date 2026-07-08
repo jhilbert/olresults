@@ -1,7 +1,10 @@
 """Shared parsing helpers for Stephan Krämer SportSoftware (OE/OE2003/OE12/
 OEScore) result exports, used by both the HTML and PDF adapters.
 """
+import json
 import re
+from functools import lru_cache
+from pathlib import Path
 
 CAT_RE = re.compile(r"^(?P<name>.+?)\s+\((?P<starters>\d+)\)\s*$")
 # same, but for formats (PDF, fixed-width text) where course info trails the
@@ -69,3 +72,100 @@ def parse_course_info(text):
 
 def is_junk_name(name):
     return not name or bool(JUNK_NAME_RE.match(name)) or name.lower() in JUNK_NAMES
+
+
+PERSON_TOKEN_RE = re.compile(r"^[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ.'’-]*$")
+
+
+def looks_like_person(name):
+    """A plausible person name: 1-4 alphabetic tokens, no digits or markup.
+    Guards the '/'-pair split against title/header fragments that also contain
+    a slash (e.g. 'Ergebnis - ÖSTM / ÖM 1. Austria Cup 2012')."""
+    toks = name.split()
+    if not (1 <= len(toks) <= 4):
+        return False
+    return all(PERSON_TOKEN_RE.match(t) for t in toks)
+
+
+# ---- multi-runner (pairs) handling for flowing-layout PDFs ----
+
+@lru_cache(maxsize=1)
+def load_clubs():
+    """Normalized club name -> canonical, from data/clubs.json (build_club_dict.py)."""
+    path = Path(__file__).resolve().parent.parent / "data" / "clubs.json"
+    if not path.exists():
+        return {}
+    out = {}
+    for c in json.loads(path.read_text()):
+        out[re.sub(r"\s+", " ", c).strip().lower()] = c
+    return out
+
+
+def find_trailing_club(tokens, clubs):
+    """Longest trailing run of tokens (up to 5) matching a known club name.
+    Returns (club_or_None, remaining_leading_tokens)."""
+    for k in range(min(5, len(tokens)), 0, -1):
+        cand = " ".join(tokens[-k:]).lower()
+        if cand in clubs:
+            return clubs[cand], tokens[:-k]
+    return None, tokens
+
+
+STATUS_TAIL_RE = re.compile(
+    r"(?i)(n\.?\s*ang\.?|nicht angetreten|aufg\.?|fehlst\.?|disq\.?|"
+    r"ohne wertung|dnf|dns|dsq|mp)\s*$")
+
+
+def parse_flow_row(text, clubs):
+    """Parse one result row from its reconstructed text when fixed columns are
+    unavailable (flowing-layout PDFs). Peels rank, start number, trailing
+    time/status, then the trailing club (via the club dictionary) and a Jg,
+    leaving the name(s) - which may be a pair joined by '/'. Returns a dict or
+    None. Only trustworthy when a club or a '/' pair was actually found."""
+    toks = text.split()
+    if not toks:
+        return None
+    # peel up to two leading integers (Pl and/or Stnr)
+    lead = []
+    while toks and toks[0].isdigit() and len(lead) < 2:
+        lead.append(toks.pop(0))
+    body = toks
+    if not body:
+        return None
+
+    time_text = status_text = None
+    if TIME_RE.match(body[-1]):
+        time_text = body[-1]
+        body = body[:-1]
+    else:
+        m = STATUS_TAIL_RE.search(" ".join(body[-3:]))
+        if m:
+            status_text = m.group(0).strip()
+            body = body[: len(body) - len(status_text.split())]
+
+    # a finisher's first leading integer is the rank; a non-finisher (status,
+    # no time) has no Pl, so its single leading integer is just the start number
+    rank = int(lead[0]) if (time_text is not None and lead) else None
+
+    club, body = find_trailing_club(body, clubs)
+    jg = None
+    if body and re.fullmatch(r"\d{2}|\d{4}", body[-1]):
+        jg, body = body[-1], body[:-1]
+    names = split_pair_names(" ".join(body))
+    return {"rank": rank, "names": names, "club": club, "jg": jg,
+            "timeText": time_text, "statusText": status_text}
+
+
+def split_pair_names(name_text):
+    """'Kasper Matilda / Hoffmann Marlene' -> two names. 'Hnilica Hannes/Sonja'
+    (shared surname, second part is a lone forename) -> ['Hnilica Hannes',
+    'Hnilica Sonja']. SportSoftware uses Lastname-Firstname order here, so the
+    shared surname is the first token."""
+    parts = [p.strip() for p in re.split(r"\s*/\s*", name_text) if p.strip()]
+    if len(parts) <= 1:
+        return parts
+    surname = parts[0].split()[0] if parts[0].split() else ""
+    out = [parts[0]]
+    for p in parts[1:]:
+        out.append(f"{surname} {p}" if (len(p.split()) == 1 and surname) else p)
+    return out

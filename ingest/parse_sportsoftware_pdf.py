@@ -32,9 +32,54 @@ import warnings
 from pathlib import Path
 
 from sportsoftware_common import (
-    CAT_LINE_RE, detect_list_type, is_junk_name, parse_course_info,
-    parse_status, parse_time,
+    CAT_LINE_RE, detect_list_type, is_junk_name, load_clubs, looks_like_person,
+    parse_course_info, parse_flow_row, parse_status, parse_time,
 )
+
+CLUBS = load_clubs()
+
+
+def valid_flow(flow):
+    """Only trust a text/club-dictionary parse when it's anchored by a known
+    club (so title/header lines and school-cup formats don't masquerade as
+    results). A pair additionally requires each side to be a clean two-token
+    'Lastname Firstname' — otherwise it's not a genuine run-in-pairs row."""
+    if not flow or not flow["club"]:
+        return False
+    names = flow["names"]
+    if len(names) > 1:
+        return all(len(n.split()) == 2 and looks_like_person(n) for n in names)
+    return bool(names) and looks_like_person(names[0])
+
+
+def flow_results(flow):
+    """Build one normalized result per runner from a parse_flow_row() result.
+    Two+ runners means a pair: each row carries the shared rank/time/club and a
+    'Partner: …' note."""
+    seconds = parse_time(flow["timeText"]) if flow.get("timeText") else None
+    status = "ok" if seconds is not None else (
+        parse_status(flow.get("statusText") or "") or "unknown")
+    is_pair = len(flow["names"]) > 1
+    out = []
+    for nm in flow["names"]:
+        if is_junk_name(nm):
+            continue
+        res = {"name": nm, "club": flow.get("club") or "",
+               "timeText": flow.get("timeText") or flow.get("statusText") or ""}
+        if flow.get("rank") is not None:
+            res["rank"] = flow["rank"]
+        if seconds is not None:
+            res["timeS"] = seconds
+        res["status"] = status
+        jg = flow.get("jg")
+        if jg and jg.isdigit():
+            y = int(jg)
+            res["yearOfBirth"] = y + (2000 if y <= 26 else 1900) if y < 100 else y
+        if is_pair:
+            res["resultKind"] = "pair"
+            res["note"] = "Partner: " + ", ".join(o for o in flow["names"] if o != nm)
+        out.append(res)
+    return out
 
 ROOT = Path(__file__).resolve().parent.parent
 RAW = ROOT / "data" / "raw" / "anne"
@@ -132,6 +177,17 @@ def parse_pdf(path):
                         continue
 
                     if current is None or headers is None:
+                        continue
+
+                    # Prefer a text parse anchored on the known-club dictionary:
+                    # it splits '/' pairs and is robust to flowing layouts where
+                    # x-column assignment misplaces name/club. Only used when it
+                    # actually recognises a trailing club or finds a pair, so
+                    # clean rows whose club isn't in the dictionary fall back to
+                    # the column parse below.
+                    flow = parse_flow_row(text, CLUBS)
+                    if valid_flow(flow):
+                        current["results"].extend(flow_results(flow))
                         continue
 
                     rec = assign_columns(line, headers)

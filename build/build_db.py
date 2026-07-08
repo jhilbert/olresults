@@ -55,6 +55,8 @@ CREATE TABLE result (
     time_behind_s INTEGER,
     out_of_competition INTEGER NOT NULL DEFAULT 0,
     course_length_m INTEGER, course_climb_m INTEGER, course_controls INTEGER,
+    result_kind TEXT NOT NULL DEFAULT 'individual',  -- individual|pair|relay
+    note TEXT,                       -- e.g. "Partner: X" / "Staffel Y, Leg N"
     source TEXT NOT NULL             -- anne-api|sportsoftware-html|...
 );
 CREATE INDEX idx_result_person ON result(person_id);
@@ -66,7 +68,7 @@ SELECT stage_id, category,
        SUM(status = 'ok')                             AS classified,
        MIN(CASE WHEN rank = 1 THEN time_s END)        AS winner_time_s
 FROM result
-WHERE status != 'dns'
+WHERE status != 'dns' AND result_kind != 'relay'  -- relay leg times aren't comparable
 GROUP BY stage_id, category;
 """
 
@@ -231,6 +233,20 @@ def load_events(cur):
     return events
 
 
+RESULT_COLS = ("stage_id", "person_id", "category", "category_full", "club",
+               "rank", "status", "time_s", "time_behind_s", "out_of_competition",
+               "course_length_m", "course_climb_m", "course_controls",
+               "result_kind", "note", "source")
+
+
+def insert_result(cur, **kw):
+    kw.setdefault("out_of_competition", 0)
+    kw.setdefault("result_kind", "individual")
+    vals = [kw.get(c) for c in RESULT_COLS]
+    cur.execute(f"INSERT INTO result ({','.join(RESULT_COLS)}) "
+                f"VALUES ({','.join('?' * len(RESULT_COLS))})", vals)
+
+
 def default_stage(cur, event, stage_ids):
     """Stage id for single-stage events: synthetic id = event id + offset."""
     sid = 10_000_000 + event["id"]
@@ -271,8 +287,12 @@ def load_anne_results(cur, events, persons, stage_ids):
                 if priority.get(r.get("resultType"), 3)
                 == best[(r.get("eventStageId"), r.get("categoryShortTitle"))]]
         for r in rows:
+            sid = r.get("eventStageId") or default_stage(cur, event, stage_ids)
+            cat = r.get("categoryShortTitle") or r.get("categoryTitle")
+            if r.get("teamMembers"):
+                n += insert_anne_relay(cur, persons, sid, cat, r)
+                continue
             name = clean_name(f"{r.get('firstName') or ''} {r.get('lastName') or ''}".strip())
-            # team rows (relays) need team/leg modelling — skipped for now;
             # some old imports carry bib/SI numbers or 'empty' placeholders
             if not is_valid_name(name) or "empty" in name.lower():
                 continue
@@ -283,21 +303,58 @@ def load_anne_results(cur, events, persons, stage_ids):
             else:
                 pid = persons.from_legacy(name, r.get("yearOfBirth"))
             persons.record(pid, name)
-            sid = r.get("eventStageId") or default_stage(cur, event, stage_ids)
             course = r.get("course") or {}
-            cur.execute(
-                "INSERT INTO result (stage_id, person_id, category, category_full,"
-                " club, rank, status, time_s, time_behind_s, out_of_competition,"
-                " course_length_m, course_climb_m, course_controls, source)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (sid, pid, r.get("categoryShortTitle") or r.get("categoryTitle"),
-                 r.get("categoryTitle"), r.get("clubName"), r.get("rank"),
-                 ANNE_STATUS.get(r.get("classification"), "unknown"),
-                 r.get("time"), r.get("timeBehind"),
-                 1 if r.get("outOfCompetition") else 0,
-                 course.get("length"), course.get("climb"), course.get("controlCount"),
-                 "anne-api"))
+            insert_result(cur, stage_id=sid, person_id=pid, category=cat,
+                          category_full=r.get("categoryTitle"), club=r.get("clubName"),
+                          rank=r.get("rank"),
+                          status=ANNE_STATUS.get(r.get("classification"), "unknown"),
+                          time_s=r.get("time"), time_behind_s=r.get("timeBehind"),
+                          out_of_competition=1 if r.get("outOfCompetition") else 0,
+                          course_length_m=course.get("length"),
+                          course_climb_m=course.get("climb"),
+                          course_controls=course.get("controlCount"),
+                          source="anne-api")
             n += 1
+    return n
+
+
+def insert_anne_relay(cur, persons, sid, cat, team):
+    """Explode a structured relay team into one result per leg runner, sharing
+    the team's rank/club, with the runner's own leg time and a note naming the
+    team and teammates. Leg time is the cumulative team time at that leg minus
+    the previous leg's (the API only gives cumulative 'overall' times)."""
+    members = team["teamMembers"]
+    names = []
+    for m in members:
+        nm = clean_name(f"{m.get('firstName') or ''} {m.get('lastName') or ''}".strip())
+        names.append(nm if is_valid_name(nm) else None)
+
+    team_name = team.get("teamName") or team.get("clubName") or ""
+    n = 0
+    prev_cum = 0
+    for m, nm in zip(members, names):
+        ov = m.get("overall") or {}
+        cum = ov.get("time")
+        leg_time = (cum - prev_cum) if (cum is not None) else None
+        if cum is not None:
+            prev_cum = cum
+        if not nm:
+            continue
+        pid = persons.from_legacy(nm, None)
+        persons.record(pid, nm)
+        mates = [o for o in names if o and o != nm]
+        note_bits = [f"Staffel: {team_name}".strip(),
+                     f"Leg {m.get('leg')}/{len(members)}"]
+        if mates:
+            note_bits.append("Team: " + ", ".join(mates))
+        insert_result(cur, stage_id=sid, person_id=pid, category=cat,
+                      category_full=team.get("categoryTitle"), club=team.get("clubName"),
+                      rank=team.get("rank"),
+                      status=ANNE_STATUS.get(m.get("classification")
+                                             or team.get("classification"), "unknown"),
+                      time_s=leg_time, result_kind="relay",
+                      note=" · ".join(note_bits), source="anne-api")
+        n += 1
     return n
 
 
@@ -322,6 +379,9 @@ def load_legacy_results(cur, events, persons, stage_ids, anne_event_ids):
             for r in cat["results"]:
                 if r.get("status") == "dns":
                     continue
+                # a parsed row may carry several runners (a pair): the parser
+                # emits one entry per runner already, each with its own name
+                # and a note; treat them uniformly here
                 name = clean_name(r["name"])
                 if not is_valid_name(name):
                     continue
@@ -331,16 +391,15 @@ def load_legacy_results(cur, events, persons, stage_ids, anne_event_ids):
                 seen.add(key)
                 pid = persons.from_legacy(name, r.get("yearOfBirth"))
                 persons.record(pid, name)
-                cur.execute(
-                    "INSERT INTO result (stage_id, person_id, category, category_full,"
-                    " club, rank, status, time_s, time_behind_s, out_of_competition,"
-                    " course_length_m, course_climb_m, course_controls, source)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (sid, pid, cat["name"], cat["name"], r.get("club"),
-                     r.get("rank"), r.get("status", "unknown"), r.get("timeS"),
-                     None, 0,
-                     cat.get("courseLengthM"), cat.get("courseClimbM"),
-                     cat.get("courseControls"), doc["source"]))
+                insert_result(cur, stage_id=sid, person_id=pid, category=cat["name"],
+                              category_full=cat["name"], club=r.get("club"),
+                              rank=r.get("rank"), status=r.get("status", "unknown"),
+                              time_s=r.get("timeS"),
+                              course_length_m=cat.get("courseLengthM"),
+                              course_climb_m=cat.get("courseClimbM"),
+                              course_controls=cat.get("courseControls"),
+                              result_kind=r.get("resultKind", "individual"),
+                              note=r.get("note"), source=doc["source"])
                 n += 1
     return n
 

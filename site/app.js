@@ -116,9 +116,9 @@ function viewRunner(id) {
       <tbody>${rows.map((r) => `
         <tr>
           <td class="dim">${fmtDate(r.stage_date || r.date_from)}</td>
-          <td><a href="#/event/${r.event_id}">${esc(r.event_title)}</a>${r.stage_title ? ` <span class="dim">· ${esc(r.stage_title)}</span>` : ""}</td>
+          <td><a href="#/event/${r.event_id}">${esc(r.event_title)}</a>${r.stage_title ? ` <span class="dim">· ${esc(r.stage_title)}</span>` : ""}${r.note ? `<div class="note">${esc(r.note)}</div>` : ""}</td>
           <td class="hide-sm dim">${esc(r.location || "")}</td>
-          <td>${esc(r.category_full || r.category)}</td>
+          <td>${esc(r.category_full || r.category)}${r.result_kind && r.result_kind !== "individual" ? ` <span class="badge">${r.result_kind === "relay" ? "Staffel" : "Paar"}</span>` : ""}</td>
           <td class="num">${rankCell(r)}</td>
           <td class="num">${fmtTime(r.time_s)}</td>
           <td class="num hide-sm dim">${r.time_behind_s ? "+" + fmtTime(r.time_behind_s) : ""}</td>
@@ -175,7 +175,7 @@ function viewEvent(id) {
             <tbody>${results.map((r) => `
               <tr>
                 <td class="num">${rankCell({ ...r, starters: null })}</td>
-                <td><a href="#/runner/${r.person_id}">${esc(r.person_name)}</a></td>
+                <td><a href="#/runner/${r.person_id}">${esc(r.person_name)}</a>${r.note ? `<div class="note">${esc(r.note)}</div>` : ""}</td>
                 <td class="hide-sm dim">${esc(r.club || "")}</td>
                 <td class="num">${fmtTime(r.time_s)}</td>
                 <td class="num dim">${r.status === "ok" && r.time_behind_s ? "+" + fmtTime(r.time_behind_s) : ""}</td>

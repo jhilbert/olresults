@@ -33,6 +33,7 @@ jobs:
         if: github.event_name != 'push'
         run: |
           python3 ingest/anne_sync.py
+          python3 ingest/build_club_dict.py
           python3 ingest/parse_sportsoftware_html.py
           python3 ingest/parse_sportsoftware_pdf.py
           python3 ingest/parse_sportsoftware_text.py
