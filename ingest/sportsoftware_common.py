@@ -65,14 +65,16 @@ def parse_status(text):
 
 
 def detect_list_type(file_name, doc_text):
-    """Relay lists parse poorly as tables; cumulative multi-day standings
-    shouldn't count as a single race. But a relay/team event often also has an
-    individual ('Einzel') result file — that's a normal race, even though the
-    event title (and thus the document head) mentions 'Staffel'."""
+    """Relay lists parse poorly as tables; cumulative multi-day standings and
+    split-time reports shouldn't count as a single race. Classify by the file
+    name, not the document head — a relay/team event often also ships an
+    individual result file whose head still mentions 'Staffel'."""
     head = doc_text[:4000]
+    if re.search(r"zwischenzeit", file_name, re.I) or re.match(r"\s*\S*\s*Zwischenzeiten", head):
+        return "overall"                       # split-times report, redundant
     if re.search(r"einzel", file_name, re.I):
-        return "race"
-    if re.search(r"staffel|relay", file_name, re.I) or re.search(r"Staffel", head):
+        return "race"                          # individual results within a Staffel event
+    if re.search(r"staffel|relay", file_name, re.I):
         return "relay"
     if re.search(r"gesamt", file_name, re.I) or "Gesamtwertung" in head:
         return "overall"
