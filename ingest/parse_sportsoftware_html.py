@@ -22,22 +22,17 @@ import urllib.request
 from html.parser import HTMLParser
 from pathlib import Path
 
+from sportsoftware_common import (
+    CAT_RE, COURSE_RE, detect_list_type, is_junk_name, parse_course_info,
+    parse_status, parse_time,
+)
+
 ROOT = Path(__file__).resolve().parent.parent
 RAW = ROOT / "data" / "raw" / "anne"
 FILES = RAW / "files"
 OUT = ROOT / "data" / "normalized"
 
 HEADERS = {"User-Agent": "olresults-sync/0.1 (+https://github.com/josefhilbert/olresults)"}
-
-# German status strings SportSoftware prints in the time column
-STATUS_MAP = {
-    "aufg": "dnf", "aufgegeben": "dnf",
-    "fehlst": "mp", "fehlstempel": "mp",
-    "disq": "dsq", "disqualifiziert": "dsq",
-    "n. angetr.": "dns", "n.angetr.": "dns", "nicht angetreten": "dns",
-    "ohne wertung": "nc", "außer konkurrenz": "nc", "wertungsfrei": "nc",
-    "dnf": "dnf", "dns": "dns", "dsq": "dsq", "mp": "mp",
-}
 
 
 class TableExtractor(HTMLParser):
@@ -88,30 +83,6 @@ class TableExtractor(HTMLParser):
         self._cells = None
 
 
-CAT_RE = re.compile(r"^(?P<name>.+?)\s+\((?P<starters>\d+)\)\s*$")
-JUNK_NAME_RE = re.compile(r"^[\d\s:.,()/-]*$")
-JUNK_NAMES = {"empty", "vacant", "leer", "frei"}
-COURSE_RE = re.compile(r"(?:(?P<km>[\d.,]+)\s*km)?\s*(?:(?P<climb>\d+)\s*Hm)?")
-TIME_RE = re.compile(r"^(?:(\d+):)?(\d{1,2}):(\d{2})$")
-
-
-def parse_time(text):
-    """'26:21' -> seconds; '1:02:33' -> seconds; else None."""
-    m = TIME_RE.match(text.strip())
-    if not m:
-        return None
-    h, mi, s = m.groups()
-    return (int(h or 0)) * 3600 + int(mi) * 60 + int(s)
-
-
-def parse_status(text):
-    t = text.strip().lower().rstrip(".")
-    for key, val in STATUS_MAP.items():
-        if key in t:
-            return val
-    return None
-
-
 def parse_document(html_text):
     ex = TableExtractor()
     ex.feed(html_text)
@@ -132,15 +103,7 @@ def parse_document(html_text):
                     "declaredStarters": int(m.group("starters")),
                     "results": [],
                 }
-                cm = COURSE_RE.search(row[1]) if len(row) > 1 else None
-                if cm and cm.group("km"):
-                    current["courseLengthM"] = int(float(cm.group("km").replace(",", ".")) * 1000)
-                if cm and cm.group("climb"):
-                    current["courseClimbM"] = int(cm.group("climb"))
-                for cell in row[2:]:
-                    pm = re.match(r"(\d+)\s*P\b", cell)
-                    if pm:
-                        current["courseControls"] = int(pm.group(1))
+                current.update(parse_course_info(" ".join(row[1:])))
                 categories.append(current)
                 columns = None
                 continue
@@ -152,7 +115,7 @@ def parse_document(html_text):
             # data row: align cells to columns
             rec = dict(zip([c or f"col{i}" for i, c in enumerate(columns)], row))
             name = rec.get("Name", "").strip()
-            if not name or JUNK_NAME_RE.match(name) or name.lower() in JUNK_NAMES:
+            if is_junk_name(name):
                 continue
             time_text = (rec.get("Zeit") or rec.get("Gesamt") or "").strip()
             rank_ok = rec.get("Pl", "").strip().isdigit()
@@ -182,17 +145,6 @@ def parse_document(html_text):
             current["results"].append(result)
 
     return [c for c in categories if c["results"]]
-
-
-def detect_list_type(file_name, html_text):
-    """Relay lists need team/leg modelling (not yet supported); cumulative
-    multi-day standings should not count as a single race."""
-    head = html_text[:4000]
-    if re.search(r"staffel|relay", file_name, re.I) or re.search(r"Staffel", head):
-        return "relay"
-    if re.search(r"gesamt", file_name, re.I) or "Gesamtwertung" in head:
-        return "overall"
-    return "race"
 
 
 def fetch(url, dest):
