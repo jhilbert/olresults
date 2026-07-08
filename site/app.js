@@ -112,17 +112,19 @@ function viewRunner(id) {
       <thead><tr>
         <th>Datum</th><th>Wettkampf</th><th class="hide-sm">Ort</th><th>Kategorie</th>
         <th class="num">Platz</th><th class="num">Zeit</th><th class="num hide-sm">Diff</th><th class="num">%</th>
+        <th class="hide-sm">Bemerkung</th>
       </tr></thead>
       <tbody>${rows.map((r) => `
         <tr>
           <td class="dim">${fmtDate(r.stage_date || r.date_from)}</td>
-          <td><a href="#/event/${r.event_id}">${esc(r.event_title)}</a>${r.stage_title ? ` <span class="dim">· ${esc(r.stage_title)}</span>` : ""}${r.note ? `<div class="note">${esc(r.note)}</div>` : ""}</td>
+          <td><a href="#/event/${r.event_id}">${esc(r.event_title)}</a>${r.stage_title ? ` <span class="dim">· ${esc(r.stage_title)}</span>` : ""}</td>
           <td class="hide-sm dim">${esc(r.location || "")}</td>
-          <td>${esc(r.category_full || r.category)}${r.result_kind && r.result_kind !== "individual" ? ` <span class="badge">${r.result_kind === "relay" ? "Staffel" : "Paar"}</span>` : ""}</td>
+          <td>${esc(r.category_full || r.category)}${r.result_kind && r.result_kind !== "individual" ? ` <span class="badge">${{ relay: "Staffel", pair: "Paar", team: "Mannschaft" }[r.result_kind] || r.result_kind}</span>` : ""}</td>
           <td class="num">${rankCell(r)}</td>
           <td class="num">${fmtTime(r.time_s)}</td>
           <td class="num hide-sm dim">${r.time_behind_s ? "+" + fmtTime(r.time_behind_s) : ""}</td>
           <td class="num">${r.status === "ok" ? fmtPct(r.time_behind_s ?? 0, r.winner_time_s) : ""}</td>
+          <td class="hide-sm dim note-cell">${r.note ? esc(r.note) : ""}</td>
         </tr>`).join("")}
       </tbody>
     </table>`;
@@ -147,9 +149,11 @@ function viewEvent(id) {
     const cats = query(`
       SELECT r.category, MAX(r.category_full) AS category_full,
              cs.starters, cs.classified, cs.winner_time_s,
+             COUNT(*) AS entries,
              MAX(r.course_length_m) AS len, MAX(r.course_climb_m) AS climb,
              MAX(r.course_controls) AS ctrls
-      FROM result r JOIN category_stats cs ON cs.stage_id = r.stage_id AND cs.category = r.category
+      FROM result r LEFT JOIN category_stats cs
+        ON cs.stage_id = r.stage_id AND cs.category = r.category
       WHERE r.stage_id = ? GROUP BY r.category ORDER BY r.category`, [st.id]);
     for (const c of cats) {
       const results = query(`
@@ -167,7 +171,7 @@ function viewEvent(id) {
         <div class="cat-block">
           <div class="cat-head">
             <h3>${esc(c.category_full || c.category)}</h3>
-            <span class="course">${course}${course ? " · " : ""}${c.starters} Starter</span>
+            <span class="course">${course}${course ? " · " : ""}${(c.starters ?? c.entries)} Starter</span>
           </div>
           <table>
             <thead><tr><th class="num">Pl</th><th>Name</th><th class="hide-sm">Verein</th>

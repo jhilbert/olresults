@@ -154,6 +154,7 @@ td a:hover { color: var(--accent-dark); }
   text-transform: uppercase; letter-spacing: .04em;
 }
 .note { font-size: 12px; color: var(--ink-faint); margin-top: 2px; }
+.note-cell { font-size: 12.5px; max-width: 260px; }
 
 .cat-block { margin-bottom: 26px; }
 .cat-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 8px; }
