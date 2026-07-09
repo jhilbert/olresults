@@ -192,6 +192,15 @@ def parse_relay_document(html_text):
     pending_rank = None
     staffel_idx = 2  # column holding the team name; some layouts omit 'Stnr',
                      # shifting it from index 2 to 1 - detected from the header
+    has_stnr = True  # whether this layout has a Stnr column; lets a
+                     # DNF team row (blank rank, no champion annotation to
+                     # steal it) be told apart from a member row, since Stnr
+                     # is always numeric and a member's name never is
+    team_row_len = member_row_len = None  # observed cell counts, captured from
+                     # the first ranked team/member rows - a second signal for
+                     # telling a rankless team row from a member row when
+                     # there's no Stnr column to check (row length differs
+                     # between the two even though both start with a blank cell)
 
     def flush():
         nonlocal pending_team
@@ -202,7 +211,9 @@ def parse_relay_document(html_text):
         for i, m in enumerate(pending_team["members"]):
             seconds = parse_time_loose(m["timeText"])
             status = "ok" if seconds is not None else (parse_status(m["timeText"]) or "unknown")
-            mates = [n for n in names if n != m["name"]]
+            # dedupe: a small team running multiple legs each (e.g. a 2-person
+            # relay run twice) repeats the same teammate's name once per leg
+            mates = list(dict.fromkeys(n for n in names if n != m["name"]))
             note_bits = [f"Staffel: {pending_team['name']}", f"Leg {i + 1}/{len(names)}"]
             if mates:
                 note_bits.append("Team: " + ", ".join(mates))
@@ -226,6 +237,8 @@ def parse_relay_document(html_text):
                 flush()
                 pending_rank = None
                 staffel_idx = 2
+                has_stnr = True
+                team_row_len = member_row_len = None
                 current = {"name": m.group("name").strip(),
                            "declaredStarters": int(m.group("starters")), "results": []}
                 current.update(parse_course_info(" ".join(row[1:])))
@@ -236,6 +249,7 @@ def parse_relay_document(html_text):
             if first == "Pl":
                 if "Staffel" in row:
                     staffel_idx = row.index("Staffel")
+                has_stnr = "Stnr" in row
                 continue  # outer header row
             if not first and len(row) > 1 and row[1].strip() == "Name":
                 continue  # inner (member) header row
@@ -250,10 +264,30 @@ def parse_relay_document(html_text):
                 pending_rank = int(first) if first.isdigit() else int(annot_m.group(1))
                 continue
 
-            if first.isdigit() or pending_rank is not None:
+            # A non-finishing team ('Fehlst' as its total time) gets no rank at
+            # all and no champion annotation precedes it, so a blank first cell
+            # is ambiguous between "new (DNF) team" and "member of the current
+            # team" - the two signals below tell them apart even without a
+            # rank: a Stnr column is always numeric (unlike a member's name),
+            # and otherwise the observed row length for team vs. member rows
+            # (captured from the first unambiguous instance of each) usually
+            # differs even though both layouts start with a blank cell.
+            confident_rank = first.isdigit() or pending_rank is not None
+            stnr_marks_team = has_stnr and len(row) > 1 and row[1].strip().isdigit()
+            len_marks_team = (not has_stnr and team_row_len and member_row_len
+                              and team_row_len != member_row_len and len(row) == team_row_len)
+
+            if confident_rank or stnr_marks_team or len_marks_team:
                 flush()
-                rank_val = int(first) if first.isdigit() else pending_rank
+                if first.isdigit():
+                    rank_val = int(first)
+                elif pending_rank is not None:
+                    rank_val = pending_rank
+                else:
+                    rank_val = None  # genuinely rankless (DNF) team
                 pending_rank = None
+                if confident_rank and not has_stnr:
+                    team_row_len = team_row_len or len(row)
                 idx = staffel_idx if len(row) > staffel_idx else (len(row) - 1)
                 team_name = row[idx].strip() if idx >= 0 and row[idx] else ""
                 pending_team = {"rank": rank_val, "name": team_name, "members": []}
@@ -264,7 +298,17 @@ def parse_relay_document(html_text):
             name = row[1].strip() if len(row) > 1 else ""
             if is_junk_name(name):
                 continue
-            leg_time = row[3].strip() if len(row) > 3 else ""
+            member_row_len = member_row_len or len(row)
+            # own leg time is the first time-like (or status) cell after Name -
+            # column count varies (Name+Zeit only; Name+Jg+Zeit; Name+EPl+Zeit+
+            # WPl+W Zeit, where the own time must not be confused with the
+            # cumulative WZeit that follows it)
+            leg_time = ""
+            for cell in row[2:]:
+                cell = cell.strip()
+                if cell and (TIME_TOKEN_RE.search(cell) or parse_status(cell)):
+                    leg_time = cell
+                    break
             pending_team["members"].append({"name": name, "timeText": leg_time})
 
     flush()

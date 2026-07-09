@@ -365,7 +365,7 @@ def insert_anne_relay(cur, persons, sid, cat, team):
         if m.get("firstName"):
             persons.first_names.add(m["firstName"].strip().lower())
         persons.record(pid, nm, authoritative=bool(m.get("firstName") and m.get("lastName")))
-        mates = [o for o in names if o and o != nm]
+        mates = list(dict.fromkeys(o for o in names if o and o != nm))
         note_bits = [f"Staffel: {team_name}".strip(),
                      f"Leg {m.get('leg')}/{len(members)}"]
         if mates:
