@@ -278,6 +278,22 @@ def default_stage(cur, event, stage_ids):
     return sid
 
 
+def dated_stage(cur, event, stage_ids, date, number):
+    """One stage per distinct legacy-file date within an event that actually
+    spans multiple real days under a single ANNE id (e.g. an Austria-Cup
+    weekend: Lang one day, Mittel the next, both filed under one event) -
+    otherwise same-named categories on different days ('Herren ab 55' both
+    days) collide into default_stage()'s single synthetic stage and one
+    day's results get silently dropped from the dedup in load_legacy_results.
+    """
+    sid = 20_000_000 + event["id"] * 100 + number
+    if sid not in stage_ids:
+        cur.execute("INSERT INTO stage VALUES (?,?,?,?,?,?)",
+                    (sid, event["id"], number, None, date, event.get("location")))
+        stage_ids.add(sid)
+    return sid
+
+
 def load_anne_results(cur, events, persons, stage_ids):
     n = 0
     for path in sorted((RAW / "results").glob("*.json")):
@@ -389,6 +405,10 @@ def load_legacy_results(cur, events, persons, stage_ids, anne_event_ids):
     # plain result lists before split-time lists, so duplicates resolve
     # in favour of the cleaner source
     docs.sort(key=lambda d: (d["eventId"], "split" in d["fileName"].lower()))
+    dates_by_event = defaultdict(set)
+    for d in docs:
+        if d.get("docDate"):
+            dates_by_event[d["eventId"]].add(d["docDate"])
     seen = set()
     for doc in docs:
         eid = doc["eventId"]
@@ -403,7 +423,12 @@ def load_legacy_results(cur, events, persons, stage_ids, anne_event_ids):
         # as one team-level row each; they're shown on event pages and excluded
         # from the runner directory.
         is_team = event.get("competitionType") == "team"
-        sid = default_stage(cur, event, stage_ids)
+        event_dates = sorted(dates_by_event.get(eid) or [])
+        if len(event_dates) > 1 and doc.get("docDate") in event_dates:
+            sid = dated_stage(cur, event, stage_ids, doc["docDate"],
+                               event_dates.index(doc["docDate"]) + 1)
+        else:
+            sid = default_stage(cur, event, stage_ids)
         for cat in doc["categories"]:
             for r in cat["results"]:
                 if r.get("status") == "dns":

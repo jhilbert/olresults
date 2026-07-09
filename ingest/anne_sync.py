@@ -17,7 +17,9 @@ from datetime import date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from sportsoftware_common import CLUB_LINK_ALLOWLIST, MANUAL_ATTACHMENT_OVERRIDES  # noqa: E402
+from sportsoftware_common import (  # noqa: E402
+    CLUB_LINK_ALLOWLIST, MANUAL_ATTACHMENT_OVERRIDES, MANUAL_PDF_OVERRIDES,
+)
 
 BASE = "https://anne-api.oefol.at/v1"
 HEADERS = {
@@ -136,6 +138,14 @@ def sync_attachments(events, known, force):
         for url, filename in overrides:
             if url not in urls:
                 existing.append({"url": url, "fileName": filename, "mimeType": "text/link"})
+        known[str(eid)] = existing
+
+    for eid, overrides in MANUAL_PDF_OVERRIDES.items():
+        existing = known.get(str(eid)) or []
+        urls = {a["url"] for a in existing}
+        for url, filename in overrides:
+            if url not in urls:
+                existing.append({"url": url, "fileName": filename, "mimeType": "application/pdf"})
         known[str(eid)] = existing
 
     (RAW / "attachments.json").write_text(json.dumps(known, ensure_ascii=False))

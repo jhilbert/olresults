@@ -23,6 +23,26 @@ MANUAL_ATTACHMENT_OVERRIDES = {
     1303: [("http://www.hsvwrn-ol.at/german/events/ergebnisse/2015/wintertour6.htm", "")],
 }
 
+# Same idea, but for organizers who publish a genuine SportSoftware PDF on
+# their own site with no ANNE attachment at all (ANNE only links to their
+# homepage). {event_id: [(url, fileName), ...]}
+MANUAL_PDF_OVERRIDES = {
+    4552: [("https://carinthian-lakecup.at/wp-content/uploads/2024/06/20240622Ergday2.pdf",
+            "20240622Ergday2.pdf")],  # 7. KOLV Cup, Schiefling, 2024-06-22 (Etappe 2)
+    4553: [("https://carinthian-lakecup.at/wp-content/uploads/2024/06/20240622Ergday3.pdf",
+            "20240622Ergday3.pdf")],  # 8. KOLV Cup, Rosegg-Bergl, 2024-06-23 (Etappe 3)
+}
+
+# Events whose results live only on liveresultat.orientering.se (a live-
+# timing service some organizers use instead of a SportSoftware export) with
+# no ANNE attachment pointing there either - found by hand on the
+# organizer's own results archive. {event_id: [comp_id, ...]}
+MANUAL_LIVERESULTAT_COMPS = {
+    4233: [30654],         # Vienna O Challenge 2024, Etappe 1 (2024-08-30)
+    4440: [30655],         # Vienna O Challenge 2024, Etappe 2 (2024-08-31)
+    4292: [30957, 30657],  # Vienna O Challenge & Sprint Relay 2024, Etappe 3 + relay (2024-09-01)
+}
+
 CAT_RE = re.compile(r"^(?P<name>.+?)\s+\((?P<starters>\d+)\)\s*$")
 # same, but for formats (PDF, fixed-width text) where course info trails the
 # category on the same line: "H21-Wien (21) 7.8 km 280 Hm 27 P". Also tolerates
@@ -96,6 +116,31 @@ def detect_list_type(file_name, doc_text):
     if re.search(r"gesamt", file_name, re.I) or "Gesamtwertung" in head:
         return "overall"
     return "race"
+
+
+FILENAME_DATE_RE = re.compile(r"erg(\d{2})(\d{2})(\d{2})(?!\d)", re.I)
+DOC_DATE_RE = re.compile(r"\b(\d{1,2})\.(\d{1,2})\.(20\d{2})\b")
+
+
+def guess_doc_date(file_name, doc_text):
+    """A multi-day event (e.g. an Austria-Cup weekend: Lang one day, Mittel
+    the next) is often ingested as legacy files under a single ANNE event id
+    with no per-day structure of its own - build_db.py needs to know which
+    calendar day each file belongs to so same-named categories on different
+    days ('Herren ab 55' both days) don't collide into one stage and silently
+    drop one day's results. SportSoftware's own 'ergDDMMYY...' filename
+    convention is the most reliable signal (many exports carry no date in
+    their own text at all); a 'DD.MM.YYYY' date printed in the document head
+    is the fallback for filenames that don't follow it."""
+    m = FILENAME_DATE_RE.search(file_name or "")
+    if m:
+        d, mo, y = m.groups()
+        return f"20{y}-{mo}-{d}"
+    m = DOC_DATE_RE.search((doc_text or "")[:500])
+    if m:
+        d, mo, y = m.groups()
+        return f"{y}-{int(mo):02d}-{int(d):02d}"
+    return None
 
 
 def parse_course_info(text):

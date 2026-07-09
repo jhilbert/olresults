@@ -32,8 +32,9 @@ import warnings
 from pathlib import Path
 
 from sportsoftware_common import (
-    CAT_LINE_RE, detect_list_type, is_junk_name, load_clubs, looks_like_person,
-    parse_course_info, parse_flow_row, parse_status, parse_time,
+    CAT_LINE_RE, STATUS_TAIL_RE, detect_list_type, find_trailing_club, guess_doc_date,
+    is_junk_name, load_clubs, looks_like_person, parse_course_info, parse_flow_row,
+    parse_status, parse_time, parse_time_loose,
 )
 
 CLUBS = load_clubs()
@@ -102,6 +103,18 @@ DATE_HEADER_RE = re.compile(r"\d{1,2}\.\d{1,2}\.\d{4}")
 TIME_TOKEN_RE = re.compile(r"\d{1,3}:\d{2}(?::\d{2})?")
 LINE_TOLERANCE = 3  # px, for clustering words into the same visual line
 
+# Some clubs export a "flowing" PDF with no Pl/Stnr/Verein column headers at
+# all: a numbered list "1. Name Club Zeit [Rückstand] [Zeit verloren]", with
+# category lines like "Herren A (17 / 17) Zeit Rückstand Zeit verloren" or
+# "Kategorie ULTIMATE" (no starter count at all). parse_pdf()'s column logic
+# never gets going here since it never finds a "Pl"/"Platz" header; see
+# parse_flowing_pdf() below.
+FLOW_CAT_RE = re.compile(r"^(?P<name>.+?)\s*\((?P<starters>\d+)(?:\s*/\s*\d+)?\)?\s*(?P<rest>.*)$")
+FLOW_CAT_PLAIN_RE = re.compile(r"^Kategorie\s+(?P<name>.+)$", re.I)
+FLOW_TIME_RE = re.compile(r"^\+?\d{1,3}:\d{2}(?::\d{2})?$")
+RANK_PREFIX_RE = re.compile(r"^\d+\.?$")
+RELAY_HEADER_RE = re.compile(r"^Pl\s+Stnr\s+Staffel\b", re.M)
+
 
 def group_lines(words):
     """Cluster words sharing (approximately) the same vertical position."""
@@ -127,7 +140,7 @@ def assign_columns(line_words, headers):
     return rec
 
 
-def parse_pdf(path):
+def parse_pdf(path, allow_inline_splits=False):
     import pdfplumber
 
     categories = []
@@ -140,7 +153,8 @@ def parse_pdf(path):
         with pdfplumber.open(path) as pdf:
             if pdf.pages:
                 head_text = pdf.pages[0].extract_text() or ""
-            if SPLITS_RE.search(head_text):
+            has_inline_splits = bool(SPLITS_RE.search(head_text))
+            if has_inline_splits and not allow_inline_splits:
                 return [], head_text
             for page in pdf.pages:
                 words = page.extract_words(use_text_flow=False, keep_blank_chars=False)
@@ -202,6 +216,19 @@ def parse_pdf(path):
                             rank_text, name = leaked.group(1), leaked.group(2)
                     if is_junk_name(name):
                         continue
+                    if has_inline_splits:
+                        # this layout also carries per-control split times
+                        # below each name, which repeats the club and its own
+                        # split diffs on the following visual line; unlike a
+                        # genuine unplaced/DNF row (which still gets a numeric
+                        # Stnr), that continuation line has neither Pl nor
+                        # Stnr, so it's the one case where requiring one is
+                        # safe - a general requirement elsewhere loses real
+                        # DNF rows whose Stnr the layout doesn't expose cleanly
+                        stnr_text = (rec.get("Stnr") or "").strip()
+                        if (any(h[0] == "Stnr" for h in headers)
+                                and not rank_text.isdigit() and not stnr_text.isdigit()):
+                            continue
                     time_text = (rec.get("Zeit") or rec.get("Gesamt") or "").strip()
                     if not rank_text.isdigit() and not time_text:
                         continue
@@ -241,6 +268,188 @@ def parse_pdf(path):
     return categories, head_text
 
 
+def parse_flow_category_line(text):
+    """Recognize a category header in the numbered-list layout. Returns
+    (name, declaredStarters_or_None) or None. Guards against a numbered data
+    row ('1. Erik Simkovics ... 1 (Posten 60)') being mistaken for one: a
+    genuine category never starts with a rank prefix."""
+    if RANK_PREFIX_RE.match(text.split(" ", 1)[0]):
+        return None
+    m = FLOW_CAT_RE.match(text)
+    if m and re.search(r"\(\d", text):
+        return m.group("name").strip(), int(m.group("starters"))
+    m = FLOW_CAT_PLAIN_RE.match(text)
+    if m:
+        return m.group("name").strip(), None
+    return None
+
+
+def parse_flow_result_row(text, clubs):
+    """Parse one result row from the numbered-list layout: '25. Josef Hilbert
+    Naturfreunde Wien 34:08 1 (Posten 53)' or, for a non-finisher, 'Doris
+    Gittmaier HSV Ried Fehlst'. Unlike parse_flow_row() (built for the
+    Pl/Stnr-column PDFs' flowing fallback), this format's trailing fields
+    after the finish time vary (Rückstand, Zeit verloren, penalty notes), so
+    it takes the *first* time-like token as the finish time and discards
+    everything after it, rather than requiring the time to be the last token."""
+    toks = text.split()
+    if not toks:
+        return None
+    forced_status = None
+    if toks[0] == "AK":  # "außer Konkurrenz" - non-competitive entry
+        forced_status = "nc"
+        toks = toks[1:]
+    if not toks:
+        return None
+    rank = None
+    if RANK_PREFIX_RE.match(toks[0]):
+        rank = int(toks[0].rstrip("."))
+        toks = toks[1:]
+    if not toks:
+        return None
+
+    time_idx = next((i for i, t in enumerate(toks) if FLOW_TIME_RE.match(t)), None)
+    if time_idx is not None:
+        body, time_text, status_text = toks[:time_idx], toks[time_idx].lstrip("+"), None
+    else:
+        joined = " ".join(toks)
+        m = STATUS_TAIL_RE.search(joined)
+        if not m:
+            return None
+        status_text, time_text = m.group(0).strip(), None
+        body = joined[: m.start()].split()
+
+    if not body:
+        return None
+    club, name_toks = find_trailing_club(body, clubs)
+    if club is None:
+        club, name_toks = (body[-1], body[:-1]) if len(body) > 1 else ("", body)
+    name = " ".join(name_toks).strip()
+    if is_junk_name(name) or not looks_like_person(name):
+        return None
+
+    result = {"name": name, "club": club or "", "timeText": time_text or status_text or ""}
+    if rank is not None:
+        result["rank"] = rank
+    seconds = parse_time(time_text) if time_text else None
+    if seconds is not None:
+        result["timeS"] = seconds
+    result["status"] = forced_status or ("ok" if seconds is not None else (parse_status(status_text or "") or "unknown"))
+    return result
+
+
+def parse_flowing_pdf(path):
+    """Fallback for the numbered-list layout (no Pl/Stnr/Verein columns) that
+    parse_pdf() can't see at all, since it never finds a "Pl"/"Platz" header
+    to anchor on. Works on plain extracted text, not word x-positions -
+    there are no columns to align."""
+    import pdfplumber
+
+    categories, current = [], None
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pdfplumber.open(path) as pdf:
+            for page in pdf.pages:
+                for line in (page.extract_text() or "").split("\n"):
+                    line = line.strip()
+                    if not line or DATE_HEADER_RE.search(line):
+                        continue
+                    cat = parse_flow_category_line(line)
+                    if cat:
+                        name, starters = cat
+                        if current and current["name"] == name:
+                            continue  # repeated header across pages
+                        current = {"name": name, "declaredStarters": starters, "results": []}
+                        categories.append(current)
+                        continue
+                    if current is None:
+                        continue
+                    row = parse_flow_result_row(line, CLUBS)
+                    if row:
+                        current["results"].append(row)
+
+    categories = [c for c in categories if c["results"]]
+    for c in categories:
+        if c["declaredStarters"] is None:
+            c["declaredStarters"] = len(c["results"])
+    return categories
+
+
+def parse_relay_pdf(path):
+    """PDF twin of parse_relay_document() in the HTML parser: 'Pl Stnr
+    Staffel Zeit' header, then per-category team rows ('1 24 FUN-OL NÖ 1
+    39:06') each immediately followed by that team's member rows
+    ('Hartberger Peter 13 13:28', no leading digit). parse_flow_row() (with
+    an empty club dict, since a team name isn't a real club) already knows
+    how to peel a leading rank/Stnr and a trailing time/status from either
+    row shape - the only new logic here is grouping consecutive rows into
+    (team, members) blocks, mirroring parse_relay_document()'s flush()."""
+    import pdfplumber
+
+    categories, current, pending_team = [], None, None
+
+    def flush():
+        nonlocal pending_team
+        if not pending_team or not pending_team["members"]:
+            pending_team = None
+            return
+        names = [m["name"] for m in pending_team["members"]]
+        for i, m in enumerate(pending_team["members"]):
+            seconds = parse_time_loose(m["timeText"]) if m["timeText"] else None
+            status = "ok" if seconds is not None else (parse_status(m["timeText"] or "") or "unknown")
+            mates = list(dict.fromkeys(n for n in names if n != m["name"]))
+            note_bits = [f"Staffel: {pending_team['name']}", f"Leg {i + 1}/{len(names)}"]
+            if mates:
+                note_bits.append("Team: " + ", ".join(mates))
+            result = {"name": m["name"], "club": pending_team["name"],
+                      "timeText": m["timeText"] or "", "resultKind": "relay",
+                      "note": " · ".join(note_bits), "status": status}
+            if pending_team["rank"] is not None:
+                result["rank"] = pending_team["rank"]
+            if seconds is not None:
+                result["timeS"] = seconds
+            current["results"].append(result)
+        pending_team = None
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pdfplumber.open(path) as pdf:
+            for page in pdf.pages:
+                for line in (page.extract_text() or "").split("\n"):
+                    line = line.strip()
+                    if not line or CONTINUATION_RE.match(line) or DATE_HEADER_RE.search(line):
+                        continue
+                    if line in ("Pl Stnr Staffel Zeit", "Name Jg Zeit"):
+                        continue
+                    m = CAT_LINE_RE.match(line)
+                    if m and re.search(r"\(\d", line):
+                        flush()
+                        name = m.group("name").strip()
+                        current = {"name": name, "declaredStarters": int(m.group("starters")),
+                                   "results": []}
+                        categories.append(current)
+                        continue
+                    if current is None:
+                        continue
+
+                    flow = parse_flow_row(line, {})
+                    if not flow or not flow["names"] or not (flow["timeText"] or flow["statusText"]):
+                        continue
+                    time_text = flow["timeText"] or flow["statusText"] or ""
+                    if line[0].isdigit():
+                        flush()
+                        pending_team = {"name": flow["names"][0], "rank": flow["rank"], "members": []}
+                    elif pending_team is not None:
+                        pending_team["members"].append({"name": flow["names"][0], "timeText": time_text})
+            flush()
+
+    categories = [c for c in categories if c["results"]]
+    for c in categories:
+        if c["declaredStarters"] is None:
+            c["declaredStarters"] = len(c["results"])
+    return categories
+
+
 def fetch(url, dest):
     if dest.exists():
         return dest.read_bytes()
@@ -263,20 +472,32 @@ def main():
 
     jobs = []
     for eid, files in attachments.items():
+        # a Zwischenzeiten-titled PDF that's the event's *only* attachment
+        # can't be a duplicate of some other results file - safe to parse
+        # its inline per-control splits rather than skip it outright
+        sole_attachment = len(files or []) == 1
         for n, f in enumerate(files or []):
             if f["mimeType"] == "application/pdf":
-                jobs.append((int(eid), n, f))
+                jobs.append((int(eid), n, f, sole_attachment))
     if args.limit:
         jobs = jobs[: args.limit]
     print(f"pdf files to parse: {len(jobs)}")
 
     ok = empty = failed = 0
-    for eid, n, f in jobs:
+    for eid, n, f, sole_attachment in jobs:
         out_path = OUT / f"{eid}-{n}.json"
         pdf_path = FILES / f"{eid}-{n}.pdf"
         try:
             fetch(f["url"], pdf_path)
-            cats, head_text = parse_pdf(pdf_path)
+            cats, head_text = parse_pdf(pdf_path, allow_inline_splits=sole_attachment)
+            if not cats:
+                # parse_pdf() only understands the fixed Pl/Stnr/Verein/Zeit
+                # column layout; two other SportSoftware export styles need
+                # their own logic entirely (see their docstrings)
+                if RELAY_HEADER_RE.search(head_text):
+                    cats = parse_relay_pdf(pdf_path)
+                else:
+                    cats = parse_flowing_pdf(pdf_path)
             if not cats:
                 empty += 1
                 continue
@@ -286,6 +507,7 @@ def main():
                 "sourceUrl": f["url"],
                 "fileName": f["fileName"],
                 "listType": detect_list_type(f["fileName"], head_text),
+                "docDate": guess_doc_date(f["fileName"], head_text),
                 "categories": cats,
             }, ensure_ascii=False))
             ok += 1

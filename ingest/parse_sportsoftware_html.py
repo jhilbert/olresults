@@ -24,8 +24,8 @@ from pathlib import Path
 
 from sportsoftware_common import (
     CAT_RE, COURSE_RE, TIME_TOKEN_RE, detect_list_type, expand_pair_result,
-    is_junk_name, parse_course_info, parse_status, parse_time, parse_time_loose,
-    team_results_from_pairs,
+    guess_doc_date, is_junk_name, parse_course_info, parse_status, parse_time,
+    parse_time_loose, team_results_from_pairs,
 )
 
 ANNOT_RANK_RE = re.compile(r"(?i)meister|sieger")
@@ -380,6 +380,7 @@ def main():
                 "sourceUrl": f["url"],
                 "fileName": f["fileName"],
                 "listType": detect_list_type(f["fileName"], text),
+                "docDate": guess_doc_date(f["fileName"], text),
                 "categories": cats,
             }, ensure_ascii=False))
             ok += 1

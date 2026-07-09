@@ -38,6 +38,7 @@ jobs:
           python3 ingest/parse_sportsoftware_pdf.py
           python3 ingest/parse_sportsoftware_text.py
           python3 ingest/parse_club_table.py
+          python3 ingest/parse_liveresultat.py
 
       - name: Commit new snapshots
         if: github.event_name != 'push'
