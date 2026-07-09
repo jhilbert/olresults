@@ -111,7 +111,7 @@ function viewRunner(id) {
     <table>
       <thead><tr>
         <th>Datum</th><th>Wettkampf</th><th class="hide-sm">Ort</th><th>Kategorie</th>
-        <th class="num">Platz</th><th class="num">Zeit</th><th class="num hide-sm">Diff</th><th class="num">%</th>
+        <th class="num">Platz</th><th class="num">Zeit</th><th class="num">Diff</th><th class="num">%</th>
         <th class="hide-sm">Bemerkung</th>
       </tr></thead>
       <tbody>${rows.map((r) => `
@@ -122,7 +122,7 @@ function viewRunner(id) {
           <td>${esc(r.category_full || r.category)}${r.result_kind && r.result_kind !== "individual" ? ` <span class="badge">${{ relay: "Staffel", pair: "Paar", team: "Mannschaft" }[r.result_kind] || r.result_kind}</span>` : ""}</td>
           <td class="num">${rankCell(r)}</td>
           <td class="num">${fmtTime(r.time_s)}</td>
-          <td class="num hide-sm dim">${r.time_behind_s ? "+" + fmtTime(r.time_behind_s) : ""}</td>
+          <td class="num dim">${r.time_behind_s ? "+" + fmtTime(r.time_behind_s) : ""}</td>
           <td class="num">${r.status === "ok" ? fmtPct(r.time_behind_s ?? 0, r.winner_time_s) : ""}</td>
           <td class="hide-sm dim note-cell">${r.note ? esc(r.note) : ""}</td>
         </tr>`).join("")}
@@ -204,24 +204,17 @@ function setupSearch() {
     timer = setTimeout(() => {
       const q = input.value.trim();
       if (q.length < 2) { dropdown.hidden = true; return; }
-      const like = `%${q}%`;
+      // runners only: event names collide too often (many "WOLV Cup" etc.
+      // across years) to be a useful match target here — use the Wettkämpfe
+      // list/year filter to find a specific event instead
       const persons = query(
         `SELECT p.id, p.name, p.year_of_birth,
                 (SELECT COUNT(*) FROM result r WHERE r.person_id = p.id) AS n
-         FROM person p WHERE p.name LIKE ? ORDER BY n DESC LIMIT 8`, [like]);
-      const events = query(
-        `SELECT e.id, e.title, e.date_from FROM event e
-         WHERE e.title LIKE ? AND EXISTS
-           (SELECT 1 FROM stage s JOIN result r ON r.stage_id = s.id WHERE s.event_id = e.id)
-         ORDER BY e.date_from DESC LIMIT 5`, [like]);
-      let html = "";
-      if (persons.length) html += `<div class="group">Läufer:innen</div>` +
-        persons.map((p) => `<a href="#/runner/${p.id}">${esc(p.name)}
-          <span class="meta">${p.year_of_birth ? "Jg. " + p.year_of_birth + " · " : ""}${p.n} Starts</span></a>`).join("");
-      if (events.length) html += `<div class="group">Wettkämpfe</div>` +
-        events.map((e) => `<a href="#/event/${e.id}">${esc(e.title)}
-          <span class="meta">${fmtDate(e.date_from)}</span></a>`).join("");
-      dropdown.innerHTML = html || `<div class="group">Keine Treffer</div>`;
+         FROM person p WHERE p.name LIKE ? ORDER BY n DESC LIMIT 10`, [`%${q}%`]);
+      dropdown.innerHTML = persons.length
+        ? persons.map((p) => `<a href="#/runner/${p.id}">${esc(p.name)}
+            <span class="meta">${p.year_of_birth ? "Jg. " + p.year_of_birth + " · " : ""}${p.n} Starts</span></a>`).join("")
+        : `<div class="group">Keine Treffer</div>`;
       dropdown.hidden = false;
     }, 150);
   });

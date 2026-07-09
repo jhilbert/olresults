@@ -32,7 +32,7 @@ header {
   border-bottom: 1px solid var(--line);
   position: sticky; top: 0; z-index: 10;
 }
-.header-inner { display: flex; align-items: center; gap: 24px; height: 58px; }
+.header-inner { display: flex; align-items: center; gap: 24px; height: 58px; flex-wrap: wrap; }
 .brand {
   font-size: 20px; font-weight: 800; letter-spacing: -0.5px;
   color: var(--ink); text-decoration: none; white-space: nowrap;
@@ -176,8 +176,13 @@ footer {
 footer a { color: var(--accent-dark); text-decoration: none; }
 
 @media (max-width: 640px) {
-  .header-inner { gap: 12px; }
-  .brand { font-size: 17px; }
+  .header-inner {
+    height: auto; gap: 10px 12px; padding: 10px 0;
+  }
+  .brand { font-size: 17px; order: 1; }
+  .search { order: 2; flex: 1 1 auto; min-width: 0; max-width: none; }
+  .refresh { order: 3; }
+  .nav { order: 4; flex: 1 0 100%; gap: 16px; }
   td, thead th { padding: 7px 8px; }
   .hide-sm { display: none; }
 }
