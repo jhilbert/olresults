@@ -51,6 +51,18 @@ jobs:
       - name: Build database
         run: python3 build/build_db.py
 
+      - name: Cache-bust app shell
+        # GitHub Pages sets cache-control: max-age=600 on every static file
+        # with no way to override it, and mobile Safari in particular can
+        # hold onto that well past its stated lifetime. Give style.css and
+        # app.js a version query tied to this run, and expose the same
+        # version to app.js so every normal page load - not just a manual
+        # refresh - fetches the current deploy's database too.
+        run: |
+          V="${GITHUB_SHA:0:8}-${GITHUB_RUN_NUMBER}"
+          sed -i "s/style.css\"/style.css?v=$V\"/; s/app.js\"/app.js?v=$V\"/" site/index.html
+          sed -i "s#<script src=\"app.js?v=$V\"></script>#<script>window.OLR_BUILD=\"$V\";</script>\n<script src=\"app.js?v=$V\"></script>#" site/index.html
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:

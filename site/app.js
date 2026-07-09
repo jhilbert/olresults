@@ -338,9 +338,14 @@ function route() {
 }
 
 async function loadDb(SQL, { bustCache = false } = {}) {
-  // bustCache bypasses the browser's HTTP cache so a manual refresh actually
-  // re-downloads the database (a normal F5 often reuses the cached ~7 MB file)
-  const url = bustCache ? `data/results.db.gz?t=${Date.now()}` : "data/results.db.gz";
+  // Every normal page load already asks for this deploy's database (the
+  // ?v= build id, injected at deploy time, changes on every push - browsers
+  // that respect it never see a stale DB just from opening the page again).
+  // A manual refresh goes further and bypasses the cache outright with a
+  // timestamp, for the nightly-sync-only case where the app shell itself
+  // didn't change but the data did.
+  const build = window.OLR_BUILD || "dev";
+  const url = bustCache ? `data/results.db.gz?v=${build}&t=${Date.now()}` : `data/results.db.gz?v=${build}`;
   const resp = await fetch(url, bustCache ? { cache: "reload" } : {});
   const stream = resp.body.pipeThrough(new DecompressionStream("gzip"));
   const buf = await new Response(stream).arrayBuffer();
