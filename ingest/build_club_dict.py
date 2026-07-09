@@ -6,7 +6,14 @@ names and the club run together with no fixed column).
 Sources: the canonical ANNE club list (/v1/club) plus every distinct clubName
 seen in structured API results (broad coverage of legacy spellings and foreign
 clubs). Names are lightly cleaned; very short or punctuation-only ones dropped.
-"""
+
+Also writes data/official_clubs.json - just the /v1/club registry itself
+(type == "club" only, not the regional sub-federations also on that
+endpoint), with no legacy-spelling noise mixed in. build_db.py uses this
+one, not clubs.json, to canonicalize the Vereine feature's club identity -
+the site's "club" shown on an individual result is left exactly as the
+source spelled it (some events genuinely used non-official names), but the
+Vereine section needs one unambiguous name per real club."""
 import json
 import re
 import time
@@ -16,6 +23,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 RAW = ROOT / "data" / "raw" / "anne"
 OUT = ROOT / "data" / "clubs.json"
+OFFICIAL_OUT = ROOT / "data" / "official_clubs.json"
 HEADERS = {"Accept": "application/json",
            "User-Agent": "olresults-sync/0.1 (+https://github.com/josefhilbert/olresults)"}
 
@@ -33,6 +41,7 @@ def clean(name):
 
 def main():
     clubs = set()
+    official = []
 
     # canonical registered clubs
     try:
@@ -42,6 +51,8 @@ def main():
             data = d if isinstance(d, list) else d.get("data", [])
             for c in data:
                 clubs.add(clean(c.get("name")))
+                if c.get("type") == "club":
+                    official.append({"code": c.get("code"), "name": clean(c.get("name"))})
             meta = d.get("meta") if isinstance(d, dict) else None
             if not meta or page >= meta.get("lastPage", 1):
                 break
@@ -49,6 +60,11 @@ def main():
             time.sleep(0.2)
     except Exception as e:
         print("warning: /v1/club fetch failed:", e)
+
+    if official:
+        official.sort(key=lambda c: c["name"])
+        OFFICIAL_OUT.write_text(json.dumps(official, ensure_ascii=False))
+        print(f"wrote {OFFICIAL_OUT} ({len(official)} official clubs)")
 
     # every clubName seen in structured results
     for f in (RAW / "results").glob("*.json"):

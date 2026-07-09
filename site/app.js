@@ -321,21 +321,14 @@ function viewRunners(letter) {
 /* ---------- all clubs (Vereine) ---------- */
 
 let clubsCache = null;
-const CLUB_MIN_RESULTS = 5;  // filters out one-off typos/junk club strings
 
-function viewClubs(letter) {
+function viewClubs() {
   if (!clubsCache) {
     clubsCache = query(`
-      SELECT club AS name, COUNT(*) AS n, COUNT(DISTINCT person_id) AS runners
-      FROM result WHERE club IS NOT NULL AND club != ''
-      GROUP BY club HAVING COUNT(*) >= ${CLUB_MIN_RESULTS}
-      ORDER BY club COLLATE NOCASE`);
-    for (const c of clubsCache) c.letter = firstLetter(c.name);
+      SELECT official_club AS name, COUNT(*) AS n, COUNT(DISTINCT person_id) AS runners
+      FROM result WHERE official_club IS NOT NULL
+      GROUP BY official_club ORDER BY official_club COLLATE NOCASE`);
   }
-  const letters = [...new Set(clubsCache.map((c) => c.letter))]
-    .sort((a, b) => (a === "#") - (b === "#") || a.localeCompare(b));
-  const active = letter && letters.includes(letter) ? letter : letters[0];
-  const list = clubsCache.filter((c) => c.letter === active);
 
   const rowsHtml = (rows) => rows.map((c) => `
     <tr>
@@ -346,60 +339,65 @@ function viewClubs(letter) {
 
   app.innerHTML = `
     <h1>Vereine</h1>
-    <p class="sub">${clubsCache.length.toLocaleString("de-AT")} Vereine. Nach Name suchen oder Anfangsbuchstaben wählen.</p>
+    <p class="sub">${clubsCache.length.toLocaleString("de-AT")} offizielle Vereine (laut ANNE).</p>
     <input id="club-filter" class="filter" type="search" placeholder="Verein filtern …" autocomplete="off">
-    <div class="chips letters">
-      ${letters.map((l) => `<a class="chip ${l === active ? "active" : ""}" href="#/clubs/${l}">${l}</a>`).join("")}
-    </div>
     <table>
       <thead><tr><th>Verein</th><th class="num">Läufer:innen</th><th class="num">Ergebnisse</th></tr></thead>
-      <tbody id="club-rows">${rowsHtml(list)}</tbody>
+      <tbody id="club-rows">${rowsHtml(clubsCache)}</tbody>
     </table>`;
 
   const input = document.getElementById("club-filter");
   const tbody = document.getElementById("club-rows");
   input.addEventListener("input", () => {
     const q = input.value.trim().toLowerCase();
-    if (!q) { tbody.innerHTML = rowsHtml(list); return; }
-    const matches = clubsCache.filter((c) => c.name.toLowerCase().includes(q)).slice(0, 300);
+    const matches = q ? clubsCache.filter((c) => c.name.toLowerCase().includes(q)) : clubsCache;
     tbody.innerHTML = matches.length ? rowsHtml(matches)
       : `<tr><td colspan="3" class="dim">Keine Treffer</td></tr>`;
   });
 }
 
-function viewClub(name) {
-  const stats = query(`
-    SELECT COUNT(*) AS n, COUNT(DISTINCT person_id) AS runners,
-           SUM(CASE WHEN status = 'ok' AND rank = 1 THEN 1 ELSE 0 END) AS gold,
-           SUM(CASE WHEN status = 'ok' AND rank = 2 THEN 1 ELSE 0 END) AS silver,
-           SUM(CASE WHEN status = 'ok' AND rank = 3 THEN 1 ELSE 0 END) AS bronze
-    FROM result WHERE club = ?`, [name])[0];
-  if (!stats || !stats.n) { app.innerHTML = "<h1>Nicht gefunden</h1>"; return; }
+function viewClub(name, year) {
+  const info = query(`
+    SELECT COUNT(*) AS n, COUNT(DISTINCT person_id) AS runners
+    FROM result WHERE official_club = ?`, [name])[0];
+  if (!info || !info.n) { app.innerHTML = "<h1>Nicht gefunden</h1>"; return; }
 
-  const podiums = query(`
-    SELECT r.rank, r.category, r.category_full, r.result_kind, r.note,
+  const allPodiums = query(`
+    SELECT r.rank, r.category, r.category_full, r.result_kind,
            e.id AS event_id, e.title AS event_title,
            COALESCE(s.date, e.date_from) AS date, p.id AS person_id, p.name AS person_name
     FROM result r
     JOIN stage s ON s.id = r.stage_id
     JOIN event e ON e.id = s.event_id
     JOIN person p ON p.id = r.person_id
-    WHERE r.club = ? AND r.status = 'ok' AND r.rank <= 3
-    ORDER BY date DESC LIMIT 300`, [name]);
+    WHERE r.official_club = ? AND r.status = 'ok' AND r.rank <= 3
+    ORDER BY date DESC`, [name]);
+
+  const years = [...new Set(allPodiums.map((r) => r.date.slice(0, 4)))].sort((a, b) => b - a);
+  const podiums = year ? allPodiums.filter((r) => r.date.startsWith(year)) : allPodiums;
+  const gold = podiums.filter((r) => r.rank === 1).length;
+  const silver = podiums.filter((r) => r.rank === 2).length;
+  const bronze = podiums.filter((r) => r.rank === 3).length;
+
+  const chip = (val, label) => `<a class="chip ${(!year && !val) || year === val ? "active" : ""}"
+      href="#/club/${encodeURIComponent(name)}${val ? "/" + val : ""}">${label}</a>`;
 
   app.innerHTML = `
     <div class="cat-head">
       <h1>${esc(name)}</h1>
       <a class="chip" href="#/club/${encodeURIComponent(name)}/dns">Nicht angetreten</a>
     </div>
+    <p class="sub">${info.runners.toLocaleString("de-AT")} Läufer:innen · ${info.n.toLocaleString("de-AT")} Ergebnisse insgesamt.</p>
     <div class="stats">
-      <div class="stat"><b>${stats.runners}</b><span>Läufer:innen</span></div>
-      <div class="stat"><b>${stats.n}</b><span>Ergebnisse</span></div>
-      <div class="stat"><b>${stats.gold}</b><span>Gold</span></div>
-      <div class="stat"><b>${stats.silver}</b><span>Silber</span></div>
-      <div class="stat"><b>${stats.bronze}</b><span>Bronze</span></div>
+      <div class="stat"><b>${gold}</b><span>Gold</span></div>
+      <div class="stat"><b>${silver}</b><span>Silber</span></div>
+      <div class="stat"><b>${bronze}</b><span>Bronze</span></div>
     </div>
     <h2>Medaillenspiegel</h2>
+    <div class="chips">
+      ${chip(null, "Alle")}
+      ${years.map((y) => chip(y, y)).join("")}
+    </div>
     <table>
       <thead><tr>
         <th>Datum</th><th>Wettkampf</th><th>Kategorie</th><th class="num">Platz</th><th class="hide-sm">Läufer:in</th>
@@ -416,8 +414,11 @@ function viewClub(name) {
     </table>`;
 }
 
-function viewClubDns(name) {
-  const rows = query(`
+function viewClubDns(name, yearParam, modeParam) {
+  const currentYear = String(new Date().getFullYear());
+  const mode = modeParam === "runner" ? "runner" : "event";
+
+  const allRows = query(`
     SELECT e.id AS event_id, e.title AS event_title,
            COALESCE(s.date, e.date_from) AS date, r.category, r.category_full,
            p.id AS person_id, p.name AS person_name
@@ -425,27 +426,54 @@ function viewClubDns(name) {
     JOIN stage s ON s.id = r.stage_id
     JOIN event e ON e.id = s.event_id
     JOIN person p ON p.id = r.person_id
-    WHERE r.club = ? AND r.status = 'dns' AND r.source = 'anne-api'
+    WHERE r.official_club = ? AND r.status = 'dns' AND r.source = 'anne-api'
       AND COALESCE(s.date, e.date_from) >= '2026-01-01'
     ORDER BY date, e.id`, [name]);
 
-  const byEvent = [];
-  for (const r of rows) {
-    let g = byEvent[byEvent.length - 1];
-    if (!g || g.event_id !== r.event_id) {
-      g = { event_id: r.event_id, event_title: r.event_title, date: r.date, entries: [] };
-      byEvent.push(g);
-    }
-    g.entries.push(r);
-  }
+  const years = [...new Set(allRows.map((r) => r.date.slice(0, 4)).concat([currentYear]))].sort();
+  const year = yearParam === "alle" ? null : (yearParam || currentYear);
+  const rows = year ? allRows.filter((r) => r.date.startsWith(year)) : allRows;
 
-  app.innerHTML = `
-    <div class="cat-head">
-      <h1>${esc(name)} — Nicht angetreten</h1>
-      <a class="chip" href="#/club/${encodeURIComponent(name)}">← Verein</a>
-    </div>
-    <p class="sub">Registrierte, aber nicht gestartete Läufer:innen bei Wettkämpfen ab 2026 (laut ANNE).</p>
-    ${byEvent.length === 0 ? `<p class="dim">Keine Einträge gefunden.</p>` : byEvent.map((g) => `
+  const yearChip = (val, label) => `<a class="chip ${(year === val) || (!year && val === null) ? "active" : ""}"
+      href="#/club/${encodeURIComponent(name)}/dns/${val || "alle"}/${mode}">${label}</a>`;
+  const modeChip = (val, label) => `<a class="chip ${mode === val ? "active" : ""}"
+      href="#/club/${encodeURIComponent(name)}/dns/${yearParam === "alle" ? "alle" : year || currentYear}/${val}">${label}</a>`;
+
+  let bodyHtml;
+  if (rows.length === 0) {
+    bodyHtml = `<p class="dim">Keine Einträge gefunden.</p>`;
+  } else if (mode === "runner") {
+    const byPerson = new Map();
+    for (const r of rows) {
+      if (!byPerson.has(r.person_id)) byPerson.set(r.person_id, { person_id: r.person_id, person_name: r.person_name, entries: [] });
+      byPerson.get(r.person_id).entries.push(r);
+    }
+    const runners = [...byPerson.values()].sort((a, b) => a.person_name.localeCompare(b.person_name));
+    bodyHtml = runners.map((g) => `
+      <div class="cat-block">
+        <div class="cat-head"><h3>${esc(g.person_name)}</h3></div>
+        <table>
+          <thead><tr><th>Wettkampf</th><th class="hide-sm">Kategorie</th><th class="num">Datum</th></tr></thead>
+          <tbody>${g.entries.map((r) => `
+            <tr>
+              <td><a href="#/event/${r.event_id}">${esc(r.event_title)}</a></td>
+              <td class="hide-sm dim">${esc(r.category_full || r.category)}</td>
+              <td class="num dim">${fmtDate(r.date)}</td>
+            </tr>`).join("")}
+          </tbody>
+        </table>
+      </div>`).join("");
+  } else {
+    const byEvent = [];
+    for (const r of rows) {
+      let g = byEvent[byEvent.length - 1];
+      if (!g || g.event_id !== r.event_id) {
+        g = { event_id: r.event_id, event_title: r.event_title, date: r.date, entries: [] };
+        byEvent.push(g);
+      }
+      g.entries.push(r);
+    }
+    bodyHtml = byEvent.map((g) => `
       <div class="cat-block">
         <div class="cat-head">
           <h3><a href="#/event/${g.event_id}">${esc(g.event_title)}</a></h3>
@@ -460,7 +488,24 @@ function viewClubDns(name) {
             </tr>`).join("")}
           </tbody>
         </table>
-      </div>`).join("")}`;
+      </div>`).join("");
+  }
+
+  app.innerHTML = `
+    <div class="cat-head">
+      <h1>${esc(name)} — Nicht angetreten</h1>
+      <a class="chip" href="#/club/${encodeURIComponent(name)}">← Verein</a>
+    </div>
+    <p class="sub">Registrierte, aber nicht gestartete Läufer:innen bei Wettkämpfen ab 2026 (laut ANNE).</p>
+    <div class="chips">
+      ${yearChip(null, "Alle")}
+      ${years.map((y) => yearChip(y, y)).join("")}
+    </div>
+    <div class="chips">
+      ${modeChip("event", "Nach Wettkampf")}
+      ${modeChip("runner", "Nach Läufer:in")}
+    </div>
+    ${bodyHtml}`;
 }
 
 /* ---------- routing & boot ---------- */
@@ -478,9 +523,11 @@ function route() {
   else if ((m = hash.match(/^#\/event\/(\d+)/))) { viewEvent(Number(m[1])); setActiveNav(); }
   else if ((m = hash.match(/^#\/events(?:\/(\d{4}))?/))) { viewEvents(m[1]); setActiveNav("events"); }
   else if ((m = hash.match(/^#\/runners(?:\/([A-Z#]))?/))) { viewRunners(m[1]); setActiveNav("runners"); }
-  else if ((m = hash.match(/^#\/club\/([^/]+)\/dns/))) { viewClubDns(decodeURIComponent(m[1])); setActiveNav("clubs"); }
-  else if ((m = hash.match(/^#\/club\/([^/]+)/))) { viewClub(decodeURIComponent(m[1])); setActiveNav("clubs"); }
-  else if ((m = hash.match(/^#\/clubs(?:\/([A-Z#]))?/))) { viewClubs(m[1]); setActiveNav("clubs"); }
+  else if ((m = hash.match(/^#\/club\/([^/]+)\/dns(?:\/(\d{4}|alle))?(?:\/(event|runner))?/))) {
+    viewClubDns(decodeURIComponent(m[1]), m[2], m[3]); setActiveNav("clubs");
+  }
+  else if ((m = hash.match(/^#\/club\/([^/]+)(?:\/(\d{4}))?/))) { viewClub(decodeURIComponent(m[1]), m[2]); setActiveNav("clubs"); }
+  else if ((m = hash.match(/^#\/clubs/))) { viewClubs(); setActiveNav("clubs"); }
   else { viewHome(); setActiveNav(); }
   window.scrollTo(0, 0);
 }

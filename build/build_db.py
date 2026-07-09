@@ -49,6 +49,8 @@ CREATE TABLE result (
     category TEXT NOT NULL,
     category_full TEXT,
     club TEXT,
+    official_club TEXT,               -- club canonicalized to ANNE's /v1/club
+                                       -- registry, for the Vereine section only
     rank INTEGER,
     status TEXT NOT NULL,            -- ok|dnf|dsq|mp|dns|nc|unknown
     time_s INTEGER,
@@ -61,6 +63,7 @@ CREATE TABLE result (
 );
 CREATE INDEX idx_result_person ON result(person_id);
 CREATE INDEX idx_result_stage_cat ON result(stage_id, category);
+CREATE INDEX idx_result_official_club ON result(official_club);
 CREATE INDEX idx_person_name ON person(name_key);
 CREATE VIEW category_stats AS
 SELECT stage_id, category,
@@ -92,6 +95,53 @@ def clean_club(name):
     if not name:
         return name
     return CLUB_JUNK_PREFIX_RE.sub("", name).strip()
+
+
+OFFICIAL_CLUBS_PATH = ROOT / "data" / "official_clubs.json"
+CLUB_SUFFIX_NUM_RE = re.compile(r"^(.+)\s(\d)$")
+CLUB_PREFIX_CODE_RE = re.compile(r"^([A-Za-zÄÖÜäöüß]{2,6})\s+(.+)$")
+
+
+def load_official_clubs():
+    """ANNE's own /v1/club registry (type=='club' only - regional sub-
+    federations excluded), fetched by build_club_dict.py. Used only to give
+    the Vereine section one unambiguous name per real club - the `club`
+    column shown on an individual result stays exactly as the source wrote
+    it, since some events genuinely used a non-official name."""
+    if not OFFICIAL_CLUBS_PATH.exists():
+        return set()
+    return {c["name"] for c in json.loads(OFFICIAL_CLUBS_PATH.read_text())}
+
+
+def canonicalize_official_club(name, official):
+    """Map a raw club string to the official club it's a variant of, or None
+    if it doesn't resolve to one. Handles a relay/pair team-number suffix
+    ('Naturfreunde Wien 2'), a trailing '*' marker, and a leaked short code
+    or first-name prefix ('NWN Naturfreunde Wien', 'Boris Naturfreunde Wien')
+    - each only accepted when stripping it lands exactly on an official name,
+    never on a guessed/partial match, so an official club whose own name
+    happens to start with a short word (e.g. 'OC Fürstenfeld') is never
+    mistaken for a prefixed variant of some other, unrelated bare name."""
+    if not name:
+        return None
+    cur = name.rstrip("*").strip()
+    while cur not in official:
+        changed = False
+        m = CLUB_SUFFIX_NUM_RE.match(cur)
+        if m and m.group(1).strip() in official:
+            cur = m.group(1).strip()
+            changed = True
+        if not changed:
+            m = CLUB_PREFIX_CODE_RE.match(cur)
+            if m and m.group(2).strip() in official:
+                cur = m.group(2).strip()
+                changed = True
+        if not changed:
+            return None
+    return cur
+
+
+OFFICIAL_CLUBS = load_official_clubs()
 
 
 def name_key(name):
@@ -264,7 +314,7 @@ def load_events(cur):
     return events
 
 
-RESULT_COLS = ("stage_id", "person_id", "category", "category_full", "club",
+RESULT_COLS = ("stage_id", "person_id", "category", "category_full", "club", "official_club",
                "rank", "status", "time_s", "time_behind_s", "out_of_competition",
                "course_length_m", "course_climb_m", "course_controls",
                "result_kind", "note", "source")
@@ -353,8 +403,10 @@ def load_anne_results(cur, events, persons, stage_ids):
                 persons.first_names.add(r["firstName"].strip().lower())
             persons.record(pid, name, authoritative=bool(r.get("firstName") and r.get("lastName")))
             course = r.get("course") or {}
+            club = clean_club(r.get("clubName"))
             insert_result(cur, stage_id=sid, person_id=pid, category=cat,
-                          category_full=r.get("categoryTitle"), club=clean_club(r.get("clubName")),
+                          category_full=r.get("categoryTitle"), club=club,
+                          official_club=canonicalize_official_club(club, OFFICIAL_CLUBS),
                           rank=r.get("rank"),
                           status=ANNE_STATUS.get(r.get("classification"), "unknown"),
                           time_s=r.get("time"), time_behind_s=r.get("timeBehind"),
@@ -398,8 +450,10 @@ def insert_anne_relay(cur, persons, sid, cat, team):
                      f"Leg {m.get('leg')}/{len(members)}"]
         if mates:
             note_bits.append("Team: " + ", ".join(mates))
+        relay_club = clean_club(team.get("clubName"))
         insert_result(cur, stage_id=sid, person_id=pid, category=cat,
-                      category_full=team.get("categoryTitle"), club=clean_club(team.get("clubName")),
+                      category_full=team.get("categoryTitle"), club=relay_club,
+                      official_club=canonicalize_official_club(relay_club, OFFICIAL_CLUBS),
                       rank=team.get("rank"),
                       status=ANNE_STATUS.get(m.get("classification")
                                              or team.get("classification"), "unknown"),
@@ -481,6 +535,7 @@ def load_legacy_results(cur, events, persons, stage_ids, anne_event_ids):
                 persons.record(pid, name)
                 insert_result(cur, stage_id=sid, person_id=pid, category=cat["name"],
                               category_full=cat["name"], club=r.get("club"),
+                              official_club=canonicalize_official_club(r.get("club"), OFFICIAL_CLUBS),
                               rank=r.get("rank"), status=r.get("status", "unknown"),
                               time_s=r.get("timeS"),
                               course_length_m=cat.get("courseLengthM"),
