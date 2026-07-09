@@ -318,6 +318,151 @@ function viewRunners(letter) {
   });
 }
 
+/* ---------- all clubs (Vereine) ---------- */
+
+let clubsCache = null;
+const CLUB_MIN_RESULTS = 5;  // filters out one-off typos/junk club strings
+
+function viewClubs(letter) {
+  if (!clubsCache) {
+    clubsCache = query(`
+      SELECT club AS name, COUNT(*) AS n, COUNT(DISTINCT person_id) AS runners
+      FROM result WHERE club IS NOT NULL AND club != ''
+      GROUP BY club HAVING COUNT(*) >= ${CLUB_MIN_RESULTS}
+      ORDER BY club COLLATE NOCASE`);
+    for (const c of clubsCache) c.letter = firstLetter(c.name);
+  }
+  const letters = [...new Set(clubsCache.map((c) => c.letter))]
+    .sort((a, b) => (a === "#") - (b === "#") || a.localeCompare(b));
+  const active = letter && letters.includes(letter) ? letter : letters[0];
+  const list = clubsCache.filter((c) => c.letter === active);
+
+  const rowsHtml = (rows) => rows.map((c) => `
+    <tr>
+      <td><a href="#/club/${encodeURIComponent(c.name)}">${esc(c.name)}</a></td>
+      <td class="num dim">${c.runners}</td>
+      <td class="num">${c.n}</td>
+    </tr>`).join("");
+
+  app.innerHTML = `
+    <h1>Vereine</h1>
+    <p class="sub">${clubsCache.length.toLocaleString("de-AT")} Vereine. Nach Name suchen oder Anfangsbuchstaben wählen.</p>
+    <input id="club-filter" class="filter" type="search" placeholder="Verein filtern …" autocomplete="off">
+    <div class="chips letters">
+      ${letters.map((l) => `<a class="chip ${l === active ? "active" : ""}" href="#/clubs/${l}">${l}</a>`).join("")}
+    </div>
+    <table>
+      <thead><tr><th>Verein</th><th class="num">Läufer:innen</th><th class="num">Ergebnisse</th></tr></thead>
+      <tbody id="club-rows">${rowsHtml(list)}</tbody>
+    </table>`;
+
+  const input = document.getElementById("club-filter");
+  const tbody = document.getElementById("club-rows");
+  input.addEventListener("input", () => {
+    const q = input.value.trim().toLowerCase();
+    if (!q) { tbody.innerHTML = rowsHtml(list); return; }
+    const matches = clubsCache.filter((c) => c.name.toLowerCase().includes(q)).slice(0, 300);
+    tbody.innerHTML = matches.length ? rowsHtml(matches)
+      : `<tr><td colspan="3" class="dim">Keine Treffer</td></tr>`;
+  });
+}
+
+function viewClub(name) {
+  const stats = query(`
+    SELECT COUNT(*) AS n, COUNT(DISTINCT person_id) AS runners,
+           SUM(CASE WHEN status = 'ok' AND rank = 1 THEN 1 ELSE 0 END) AS gold,
+           SUM(CASE WHEN status = 'ok' AND rank = 2 THEN 1 ELSE 0 END) AS silver,
+           SUM(CASE WHEN status = 'ok' AND rank = 3 THEN 1 ELSE 0 END) AS bronze
+    FROM result WHERE club = ?`, [name])[0];
+  if (!stats || !stats.n) { app.innerHTML = "<h1>Nicht gefunden</h1>"; return; }
+
+  const podiums = query(`
+    SELECT r.rank, r.category, r.category_full, r.result_kind, r.note,
+           e.id AS event_id, e.title AS event_title,
+           COALESCE(s.date, e.date_from) AS date, p.id AS person_id, p.name AS person_name
+    FROM result r
+    JOIN stage s ON s.id = r.stage_id
+    JOIN event e ON e.id = s.event_id
+    JOIN person p ON p.id = r.person_id
+    WHERE r.club = ? AND r.status = 'ok' AND r.rank <= 3
+    ORDER BY date DESC LIMIT 300`, [name]);
+
+  app.innerHTML = `
+    <div class="cat-head">
+      <h1>${esc(name)}</h1>
+      <a class="chip" href="#/club/${encodeURIComponent(name)}/dns">Nicht angetreten</a>
+    </div>
+    <div class="stats">
+      <div class="stat"><b>${stats.runners}</b><span>Läufer:innen</span></div>
+      <div class="stat"><b>${stats.n}</b><span>Ergebnisse</span></div>
+      <div class="stat"><b>${stats.gold}</b><span>Gold</span></div>
+      <div class="stat"><b>${stats.silver}</b><span>Silber</span></div>
+      <div class="stat"><b>${stats.bronze}</b><span>Bronze</span></div>
+    </div>
+    <h2>Medaillenspiegel</h2>
+    <table>
+      <thead><tr>
+        <th>Datum</th><th>Wettkampf</th><th>Kategorie</th><th class="num">Platz</th><th class="hide-sm">Läufer:in</th>
+      </tr></thead>
+      <tbody>${podiums.length ? podiums.map((r) => `
+        <tr>
+          <td class="dim">${fmtDate(r.date)}</td>
+          <td><a href="#/event/${r.event_id}">${esc(r.event_title)}</a></td>
+          <td>${esc(r.category_full || r.category)}${r.result_kind && r.result_kind !== "individual" ? ` <span class="badge">${{ relay: "Staffel", pair: "Paar", team: "Mannschaft" }[r.result_kind] || r.result_kind}</span>` : ""}</td>
+          <td class="num"><span class="rank ${r.rank === 1 ? "rank-1" : ""}">${r.rank}</span></td>
+          <td class="hide-sm"><a href="#/runner/${r.person_id}">${esc(r.person_name)}</a></td>
+        </tr>`).join("") : `<tr><td colspan="5" class="dim">Keine Podestplätze</td></tr>`}
+      </tbody>
+    </table>`;
+}
+
+function viewClubDns(name) {
+  const rows = query(`
+    SELECT e.id AS event_id, e.title AS event_title,
+           COALESCE(s.date, e.date_from) AS date, r.category, r.category_full,
+           p.id AS person_id, p.name AS person_name
+    FROM result r
+    JOIN stage s ON s.id = r.stage_id
+    JOIN event e ON e.id = s.event_id
+    JOIN person p ON p.id = r.person_id
+    WHERE r.club = ? AND r.status = 'dns' AND r.source = 'anne-api'
+      AND COALESCE(s.date, e.date_from) >= '2026-01-01'
+    ORDER BY date, e.id`, [name]);
+
+  const byEvent = [];
+  for (const r of rows) {
+    let g = byEvent[byEvent.length - 1];
+    if (!g || g.event_id !== r.event_id) {
+      g = { event_id: r.event_id, event_title: r.event_title, date: r.date, entries: [] };
+      byEvent.push(g);
+    }
+    g.entries.push(r);
+  }
+
+  app.innerHTML = `
+    <div class="cat-head">
+      <h1>${esc(name)} — Nicht angetreten</h1>
+      <a class="chip" href="#/club/${encodeURIComponent(name)}">← Verein</a>
+    </div>
+    <p class="sub">Registrierte, aber nicht gestartete Läufer:innen bei Wettkämpfen ab 2026 (laut ANNE).</p>
+    ${byEvent.length === 0 ? `<p class="dim">Keine Einträge gefunden.</p>` : byEvent.map((g) => `
+      <div class="cat-block">
+        <div class="cat-head">
+          <h3><a href="#/event/${g.event_id}">${esc(g.event_title)}</a></h3>
+          <span class="course">${fmtDate(g.date)}</span>
+        </div>
+        <table>
+          <thead><tr><th>Läufer:in</th><th>Kategorie</th></tr></thead>
+          <tbody>${g.entries.map((r) => `
+            <tr>
+              <td><a href="#/runner/${r.person_id}">${esc(r.person_name)}</a></td>
+              <td class="dim">${esc(r.category_full || r.category)}</td>
+            </tr>`).join("")}
+          </tbody>
+        </table>
+      </div>`).join("")}`;
+}
+
 /* ---------- routing & boot ---------- */
 
 function setActiveNav(name) {
@@ -333,6 +478,9 @@ function route() {
   else if ((m = hash.match(/^#\/event\/(\d+)/))) { viewEvent(Number(m[1])); setActiveNav(); }
   else if ((m = hash.match(/^#\/events(?:\/(\d{4}))?/))) { viewEvents(m[1]); setActiveNav("events"); }
   else if ((m = hash.match(/^#\/runners(?:\/([A-Z#]))?/))) { viewRunners(m[1]); setActiveNav("runners"); }
+  else if ((m = hash.match(/^#\/club\/([^/]+)\/dns/))) { viewClubDns(decodeURIComponent(m[1])); setActiveNav("clubs"); }
+  else if ((m = hash.match(/^#\/club\/([^/]+)/))) { viewClub(decodeURIComponent(m[1])); setActiveNav("clubs"); }
+  else if ((m = hash.match(/^#\/clubs(?:\/([A-Z#]))?/))) { viewClubs(m[1]); setActiveNav("clubs"); }
   else { viewHome(); setActiveNav(); }
   window.scrollTo(0, 0);
 }
@@ -351,6 +499,7 @@ async function loadDb(SQL, { bustCache = false } = {}) {
   const buf = await new Response(stream).arrayBuffer();
   db = new SQL.Database(new Uint8Array(buf));
   runnersCache = null;  // rebuilt lazily from the new db
+  clubsCache = null;
 }
 
 let sqlEngine = null;

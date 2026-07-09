@@ -81,6 +81,18 @@ ANNE_STATUS = {
     "didNotStart": "dns",
 }
 
+CLUB_JUNK_PREFIX_RE = re.compile(r"^(?:empty|leer|vacant|frei|\.)\s+", re.I)
+
+
+def clean_club(name):
+    """ANNE's own API sometimes concatenates an empty team/school-name field
+    with the real club name, leaking a placeholder prefix through
+    ('empty Naturfreunde Wien', '. OL Kufstein') - confirmed straight from
+    clubName in the raw API response, not something our own parsing adds."""
+    if not name:
+        return name
+    return CLUB_JUNK_PREFIX_RE.sub("", name).strip()
+
 
 def name_key(name):
     """Normalized identity key: lowercase, accent-stripped, sorted tokens."""
@@ -342,7 +354,7 @@ def load_anne_results(cur, events, persons, stage_ids):
             persons.record(pid, name, authoritative=bool(r.get("firstName") and r.get("lastName")))
             course = r.get("course") or {}
             insert_result(cur, stage_id=sid, person_id=pid, category=cat,
-                          category_full=r.get("categoryTitle"), club=r.get("clubName"),
+                          category_full=r.get("categoryTitle"), club=clean_club(r.get("clubName")),
                           rank=r.get("rank"),
                           status=ANNE_STATUS.get(r.get("classification"), "unknown"),
                           time_s=r.get("time"), time_behind_s=r.get("timeBehind"),
@@ -366,7 +378,7 @@ def insert_anne_relay(cur, persons, sid, cat, team):
         nm = clean_name(f"{m.get('firstName') or ''} {m.get('lastName') or ''}".strip())
         names.append(nm if is_valid_name(nm) else None)
 
-    team_name = team.get("teamName") or team.get("clubName") or ""
+    team_name = clean_club(team.get("teamName") or team.get("clubName") or "")
     n = 0
     prev_cum = 0
     for m, nm in zip(members, names):
@@ -387,7 +399,7 @@ def insert_anne_relay(cur, persons, sid, cat, team):
         if mates:
             note_bits.append("Team: " + ", ".join(mates))
         insert_result(cur, stage_id=sid, person_id=pid, category=cat,
-                      category_full=team.get("categoryTitle"), club=team.get("clubName"),
+                      category_full=team.get("categoryTitle"), club=clean_club(team.get("clubName")),
                       rank=team.get("rank"),
                       status=ANNE_STATUS.get(m.get("classification")
                                              or team.get("classification"), "unknown"),
