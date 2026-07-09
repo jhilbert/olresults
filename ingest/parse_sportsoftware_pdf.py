@@ -450,6 +450,72 @@ def parse_relay_pdf(path):
     return categories
 
 
+WINTERTOUR_HEADER_RE = re.compile(r"^Nachname\s+Vorname\b")
+WINTERTOUR_SKIP_LINES = {"Strafminuten", "Spzialwertung"}
+STATUS_WORD_RE = re.compile(r"^(fehlst(?:empel)?|aufg(?:egeben)?|disq(?:ualifiziert)?|dns|dnf|dsq|mp|n\.?\s*ang\.?)\.?$", re.I)
+
+
+def parse_wintertour_row(text):
+    """One data row of the 'Nachname Vorname Verein Zeit [Platz Strafminuten
+    Gesamtzeit] Rang/Gesamtrang' layout (e.g. the Wintertour series): unlike
+    every other PDF format here, the surname/forename are their own leading
+    columns and the rank comes *last*, with a variable number of extra
+    scoring columns in between depending on whether a penalty applies to
+    that row. Club is whatever sits between the name and the first numeric
+    (time or status) token, however many words that takes."""
+    toks = text.split()
+    if len(toks) < 4:
+        return None
+    lastname, firstname = toks[0], toks[1]
+    rest = toks[2:]
+    idx = next((i for i, t in enumerate(rest) if t[0].isdigit() or STATUS_WORD_RE.match(t)), None)
+    if not idx:
+        return None
+    club, values = " ".join(rest[:idx]), rest[idx:]
+    name = f"{lastname} {firstname}"
+    if is_junk_name(name):
+        return None
+    time_text = values[0]
+    seconds = parse_time_loose(time_text)
+    result = {"name": name, "club": club, "timeText": time_text}
+    if seconds is not None:
+        result["timeS"], result["status"] = seconds, "ok"
+        if values[-1].isdigit():
+            result["rank"] = int(values[-1])
+    else:
+        result["status"] = parse_status(time_text) or "unknown"
+    return result
+
+
+def parse_wintertour_pdf(path):
+    import pdfplumber
+
+    categories, current, candidate_name = [], None, None
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pdfplumber.open(path) as pdf:
+            for page in pdf.pages:
+                for line in (page.extract_text() or "").split("\n"):
+                    line = line.strip()
+                    if not line or line in WINTERTOUR_SKIP_LINES or DATE_HEADER_RE.search(line):
+                        continue
+                    if WINTERTOUR_HEADER_RE.match(line):
+                        if candidate_name and (not current or current["name"] != candidate_name):
+                            current = {"name": candidate_name, "declaredStarters": None, "results": []}
+                            categories.append(current)
+                        continue
+                    row = parse_wintertour_row(line) if current else None
+                    if row:
+                        current["results"].append(row)
+                    else:
+                        candidate_name = line
+
+    categories = [c for c in categories if c["results"]]
+    for c in categories:
+        c["declaredStarters"] = len(c["results"])
+    return categories
+
+
 def fetch(url, dest):
     if dest.exists():
         return dest.read_bytes()
@@ -492,10 +558,12 @@ def main():
             cats, head_text = parse_pdf(pdf_path, allow_inline_splits=sole_attachment)
             if not cats:
                 # parse_pdf() only understands the fixed Pl/Stnr/Verein/Zeit
-                # column layout; two other SportSoftware export styles need
-                # their own logic entirely (see their docstrings)
+                # column layout; other export styles need their own logic
+                # entirely (see their docstrings)
                 if RELAY_HEADER_RE.search(head_text):
                     cats = parse_relay_pdf(pdf_path)
+                elif "Nachname Vorname" in head_text:
+                    cats = parse_wintertour_pdf(pdf_path)
                 else:
                     cats = parse_flowing_pdf(pdf_path)
             if not cats:
@@ -506,7 +574,7 @@ def main():
                 "source": "sportsoftware-pdf",
                 "sourceUrl": f["url"],
                 "fileName": f["fileName"],
-                "listType": detect_list_type(f["fileName"], head_text),
+                "listType": detect_list_type(f["fileName"], head_text, sole_attachment),
                 "docDate": guess_doc_date(f["fileName"], head_text),
                 "categories": cats,
             }, ensure_ascii=False))

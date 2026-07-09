@@ -101,11 +101,19 @@ def parse_status(text):
     return None
 
 
-def detect_list_type(file_name, doc_text):
+def detect_list_type(file_name, doc_text, is_sole_attachment=False):
     """Relay lists parse poorly as tables; cumulative multi-day standings and
     split-time reports shouldn't count as a single race. Classify by the file
     name, not the document head — a relay/team event often also ships an
-    individual result file whose head still mentions 'Staffel'."""
+    individual result file whose head still mentions 'Staffel'.
+
+    'gesamt' ("overall/combined") is ambiguous: it usually means a cumulative
+    multi-race series standings sheet (redundant with each race's own
+    results), but SportSoftware also uses it for a single race's own combined
+    results across categories (e.g. 'ergebnis-gesamt.pdf' for one sprint-
+    series round) - when that file is the event's only attachment, there is
+    no other source to fall back on, so treat it as this race's own results
+    rather than silently discarding the entire event."""
     head = doc_text[:4000]
     if re.search(r"zwischenzeit", file_name, re.I) or re.match(r"\s*\S*\s*Zwischenzeiten", head):
         return "overall"                       # split-times report, redundant
@@ -113,7 +121,7 @@ def detect_list_type(file_name, doc_text):
         return "race"                          # individual results within a Staffel event
     if re.search(r"staffel|relay", file_name, re.I):
         return "relay"
-    if re.search(r"gesamt", file_name, re.I) or "Gesamtwertung" in head:
+    if (re.search(r"gesamt", file_name, re.I) or "Gesamtwertung" in head) and not is_sole_attachment:
         return "overall"
     return "race"
 

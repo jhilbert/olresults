@@ -23,7 +23,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from sportsoftware_common import (
-    CAT_RE, COURSE_RE, TIME_TOKEN_RE, detect_list_type, expand_pair_result,
+    CAT_LINE_RE, COURSE_RE, TIME_TOKEN_RE, detect_list_type, expand_pair_result,
     guess_doc_date, is_junk_name, parse_course_info, parse_status, parse_time,
     parse_time_loose, team_results_from_pairs,
 )
@@ -98,7 +98,7 @@ def parse_document(html_text):
             if not row or all(c in ("", "&nbsp") for c in row):
                 continue
             first = row[0]
-            m = CAT_RE.match(first)
+            m = CAT_LINE_RE.match(first)
             if m and len(row) >= 2:
                 # category header: "D14  (1)" | "2,3 km  130 Hm" | "8 P"
                 current = {
@@ -158,6 +158,66 @@ def parse_document(html_text):
                 result["scoreText"] = rec["Pkt"].strip()
             current["results"].extend(expand_pair_result(result))
 
+    return [c for c in categories if c["results"]]
+
+
+BRACKET_CAT_RE = re.compile(r"^\(\d+(?:\s*/\s*\d+)?\)$")
+
+
+def parse_bracket_html(html_text):
+    """Parse a liveresultat.orientering.se-exported results page (ANNE
+    stores a saved snapshot of these for e.g. a KO-Sprint's heat brackets,
+    rather than a SportSoftware export). One <table> holds a title/date row,
+    then per-heat blocks: a header row ('Viertelfinal A' | '(6 / 6)' | 'Time'
+    | 'Behind' | 'Time lost') and its data rows, all prefixed by a blank
+    spacer cell from a merged first column. A winner's row sometimes merges
+    the Time/Behind cells via colspan, but the cell *position* from the left
+    (rank, name, club, time, ...) stays the same either way - only the
+    trailing cell count varies, which parse_document()'s Pl/Name/Verein
+    header-column matching can't handle at all since this layout has no
+    header row of its own to match against."""
+    ex = TableExtractor()
+    categories, current = [], None
+    ex.feed(html_text)
+    for table in ex.tables:
+        for row in table:
+            cells = list(row)
+            if cells and cells[0] in ("", "&nbsp"):
+                cells = cells[1:]
+            if not cells or all(c in ("", "&nbsp") for c in cells):
+                continue
+            if len(cells) >= 2 and BRACKET_CAT_RE.match(cells[1].strip()):
+                name = cells[0].strip()
+                if current and current["name"] == name:
+                    continue
+                m = re.search(r"\d+", cells[1])
+                current = {"name": name, "declaredStarters": int(m.group()) if m else None,
+                           "results": []}
+                categories.append(current)
+                continue
+            if current is None or len(cells) < 2:
+                continue
+            rank = None
+            if cells[0].rstrip(".").isdigit():
+                rank = int(cells[0].rstrip("."))
+                cells = cells[1:]
+            if len(cells) < 2:
+                continue
+            name, club = cells[0].strip(), cells[1].strip()
+            if is_junk_name(name):
+                continue
+            time_text = next((c.strip().lstrip("+") for c in cells[2:]
+                               if TIME_TOKEN_RE.fullmatch(c.strip().lstrip("+"))), None)
+            result = {"name": name, "club": club, "timeText": time_text or (cells[2].strip() if len(cells) > 2 else "")}
+            if rank is not None:
+                result["rank"] = rank
+            seconds = parse_time(time_text) if time_text else None
+            if seconds is not None:
+                result["timeS"] = seconds
+                result["status"] = "ok"
+            else:
+                result["status"] = parse_status(result["timeText"]) or "unknown"
+            current["results"].append(result)
     return [c for c in categories if c["results"]]
 
 
@@ -232,7 +292,7 @@ def parse_relay_document(html_text):
             if not row or all(c in ("", "&nbsp") for c in row):
                 continue
             first = row[0].strip()
-            m = CAT_RE.match(first)
+            m = CAT_LINE_RE.match(first)
             if m:
                 flush()
                 pending_rank = None
@@ -326,9 +386,12 @@ def fetch(url, dest):
     return data
 
 
+CHARSET_UTF8_RE = re.compile(r'charset=["\']?utf-8', re.I)
+
+
 def decode(data):
     head = data[:600].decode("ascii", "ignore").lower()
-    if "charset=utf-8" in head:
+    if CHARSET_UTF8_RE.search(head):
         return data.decode("utf-8", "replace")
     return data.decode("windows-1252", "replace")
 
@@ -344,20 +407,21 @@ def main():
 
     jobs = []
     for eid, files in attachments.items():
+        sole_attachment = len(files or []) == 1
         for n, f in enumerate(files or []):
             if f["mimeType"] == "text/html":
-                jobs.append((int(eid), n, f))
+                jobs.append((int(eid), n, f, sole_attachment))
     if args.limit:
         jobs = jobs[: args.limit]
     print(f"html files to parse: {len(jobs)}")
 
     ok = empty = failed = 0
-    for eid, n, f in jobs:
+    for eid, n, f, sole_attachment in jobs:
         out_path = OUT / f"{eid}-{n}.json"
         try:
             data = fetch(f["url"], FILES / f"{eid}-{n}.html")
             text = decode(data)
-            list_type = detect_list_type(f["fileName"], text)
+            list_type = detect_list_type(f["fileName"], text, sole_attachment)
             if list_type == "overall":
                 empty += 1  # split-times / cumulative-standings report: redundant, skip
                 continue
@@ -371,6 +435,8 @@ def main():
                     # with the fixed-width text logic
                     from parse_sportsoftware_text import extract_pre_blocks, parse_text
                     cats = parse_text(extract_pre_blocks(text))
+                if not cats:
+                    cats = parse_bracket_html(text)
             if not cats:
                 empty += 1
                 continue
@@ -379,7 +445,7 @@ def main():
                 "source": "sportsoftware-html",
                 "sourceUrl": f["url"],
                 "fileName": f["fileName"],
-                "listType": detect_list_type(f["fileName"], text),
+                "listType": list_type,
                 "docDate": guess_doc_date(f["fileName"], text),
                 "categories": cats,
             }, ensure_ascii=False))

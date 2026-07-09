@@ -405,9 +405,19 @@ def load_legacy_results(cur, events, persons, stage_ids, anne_event_ids):
     # plain result lists before split-time lists, so duplicates resolve
     # in favour of the cleaner source
     docs.sort(key=lambda d: (d["eventId"], "split" in d["fileName"].lower()))
+    # only split into per-date stages for events ANNE itself says span
+    # multiple days (stageCount >= 2, or a distinct dateTo) - otherwise a
+    # single-day event's own split-times file (same race, just guesses a
+    # different "docDate" off its own filename/content than the plain
+    # results file) gets a stage of its own instead of deduping against the
+    # plain file's stage as intended, duplicating every result on that date
+    multiday_events = {
+        eid for eid, e in events.items()
+        if (e.get("stageCount") or 0) >= 2 or (e.get("dateTo") or "")[:10] not in ("", (e.get("dateFrom") or "")[:10])
+    }
     dates_by_event = defaultdict(set)
     for d in docs:
-        if d.get("docDate"):
+        if d.get("docDate") and d["eventId"] in multiday_events:
             dates_by_event[d["eventId"]].add(d["docDate"])
     seen = set()
     for doc in docs:
