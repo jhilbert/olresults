@@ -79,11 +79,11 @@ function viewHome() {
     </table>`;
 }
 
-function viewRunner(id) {
+function viewRunner(id, year) {
   const [p] = query("SELECT * FROM person WHERE id = ?", [id]);
   if (!p) { app.innerHTML = "<h1>Nicht gefunden</h1>"; return; }
 
-  const rows = query(`
+  const allRows = query(`
     SELECT r.*, e.id AS event_id, e.title AS event_title, e.location, e.country,
            e.competition_type, s.date AS stage_date, s.title AS stage_title, e.date_from,
            cs.starters, cs.classified, cs.winner_time_s
@@ -94,10 +94,17 @@ function viewRunner(id) {
     WHERE r.person_id = ?
     ORDER BY COALESCE(s.date, e.date_from) DESC`, [id]);
 
+  const years = [...new Set(allRows.map((r) => (r.stage_date || r.date_from || "").slice(0, 4)).filter(Boolean))]
+    .sort((a, b) => b - a);
+  const rows = year ? allRows.filter((r) => (r.stage_date || r.date_from || "").startsWith(year)) : allRows;
+
   const finished = rows.filter((r) => r.status === "ok" && r.rank != null);
   const wins = finished.filter((r) => r.rank === 1).length;
   const podiums = finished.filter((r) => r.rank <= 3).length;
-  const clubs = [...new Set(rows.map((r) => r.club).filter(Boolean))].slice(0, 3);
+  const clubs = [...new Set(allRows.map((r) => r.club).filter(Boolean))].slice(0, 3);
+
+  const chip = (val, label) => `<a class="chip ${(!year && !val) || year === val ? "active" : ""}"
+      href="#/runner/${id}${val ? "/" + val : ""}">${label}</a>`;
 
   app.innerHTML = `
     <h1>${esc(p.name)}</h1>
@@ -108,6 +115,10 @@ function viewRunner(id) {
       <div class="stat"><b>${podiums}</b><span>Podestplätze</span></div>
     </div>
     <h2>Ergebnisse</h2>
+    <div class="chips">
+      ${chip(null, "Alle")}
+      ${years.map((y) => chip(y, y)).join("")}
+    </div>
     <table>
       <thead><tr>
         <th>Datum</th><th>Wettkampf</th><th class="hide-sm">Ort</th><th>Kategorie</th>
@@ -519,7 +530,7 @@ function route() {
   if (!db) return;
   const hash = location.hash || "#/";
   let m;
-  if ((m = hash.match(/^#\/runner\/(-?\d+)/))) { viewRunner(Number(m[1])); setActiveNav(); }
+  if ((m = hash.match(/^#\/runner\/(-?\d+)(?:\/(\d{4}))?/))) { viewRunner(Number(m[1]), m[2]); setActiveNav(); }
   else if ((m = hash.match(/^#\/event\/(\d+)/))) { viewEvent(Number(m[1])); setActiveNav(); }
   else if ((m = hash.match(/^#\/events(?:\/(\d{4}))?/))) { viewEvents(m[1]); setActiveNav("events"); }
   else if ((m = hash.match(/^#\/runners(?:\/([A-Z#]))?/))) { viewRunners(m[1]); setActiveNav("runners"); }
