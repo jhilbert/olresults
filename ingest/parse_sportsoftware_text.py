@@ -33,8 +33,8 @@ from pathlib import Path
 
 from sportsoftware_common import (
     CAT_LINE_RE, CLUB_LINK_ALLOWLIST, COLUMN_ALIASES, detect_list_type,
-    expand_pair_result, is_junk_name, parse_course_info, parse_status,
-    parse_time, parse_time_loose, team_results_from_pairs,
+    expand_pair_result, is_junk_name, parse_champion_annotation, parse_course_info,
+    parse_status, parse_time, parse_time_loose, team_results_from_pairs,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -91,6 +91,14 @@ def parse_text(text):
     categories = []
     current = None
     labels = starts = None
+    pending_rank = pending_championship = None  # from a champion-announcement
+                     # line ("1. und Österr.Meister 2022"), which - unlike the
+                     # HTML/PDF layouts - sits on its own line rather than
+                     # merged into the winner's row; fixed-width column
+                     # slicing would garble it anyway since the announcement
+                     # text overflows the narrow "Pl" column, so it's matched
+                     # against the raw line before any column slicing and
+                     # carried forward onto the very next data row
 
     # SportSoftware indents the champion row with a tab; expand tabs so the
     # fixed-width columns line up with the header again
@@ -114,9 +122,15 @@ def parse_text(text):
                        "results": []}
             current.update(parse_course_info(cm.group("rest")))
             categories.append(current)
+            pending_rank = pending_championship = None
             continue
 
         if current is None or labels is None:
+            continue
+
+        annot_rank, annot_championship = parse_champion_annotation(line.strip())
+        if annot_rank is not None:
+            pending_rank, pending_championship = annot_rank, annot_championship
             continue
 
         pairs = [(labels[i],
@@ -146,7 +160,15 @@ def parse_text(text):
             "timeText": time_text,
         }
         if rank_text.isdigit():
+            # this row has its own rank after all - it wasn't the one the
+            # pending announcement belonged to, so drop the pending state
+            # rather than misattaching the title to an unrelated rank
             result["rank"] = int(rank_text)
+        elif pending_rank is not None:
+            result["rank"] = pending_rank
+            if pending_championship:
+                result["championship"] = pending_championship
+        pending_rank = pending_championship = None
         seconds = parse_time_loose(time_text)
         if seconds is not None:
             result["timeS"] = seconds
@@ -154,9 +176,8 @@ def parse_text(text):
         else:
             status = parse_status(time_text)
             if status is None:
-                # no valid time and no recognized status keyword: this isn't a
-                # result row (e.g. SportSoftware's "und österr. Staatsmeister"
-                # champion annotation, which steals the rank onto its own line)
+                # no valid time and no recognized status keyword: not a
+                # genuine result row
                 continue
             result["status"] = status
         yob = (rec.get("Jg") or "").strip()

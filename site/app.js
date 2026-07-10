@@ -379,34 +379,127 @@ function viewClubs() {
   });
 }
 
-function viewClub(name, year) {
+function viewClub(name, year, medalType) {
   const info = query(`
     SELECT COUNT(*) AS n, COUNT(DISTINCT person_id) AS runners
     FROM result WHERE official_club = ?`, [name])[0];
   if (!info || !info.n) { app.innerHTML = "<h1>Nicht gefunden</h1>"; return; }
 
+  // national_rank is placement among only championship-eligible (Austrian)
+  // finishers - it can differ from the overall race `rank` when a foreign/
+  // ineligible competitor placed ahead, so the ÖM/ÖSTM view needs rows that
+  // wouldn't otherwise make the top-3 by raw rank alone.
   const allPodiums = query(`
-    SELECT r.rank, r.category, r.category_full, r.result_kind,
+    SELECT r.rank, r.national_rank, r.category, r.category_full, r.result_kind, r.championship,
            e.id AS event_id, e.title AS event_title,
            COALESCE(s.date, e.date_from) AS date, p.id AS person_id, p.name AS person_name
     FROM result r
     JOIN stage s ON s.id = r.stage_id
     JOIN event e ON e.id = s.event_id
     JOIN person p ON p.id = r.person_id
-    WHERE r.official_club = ? AND r.status = 'ok' AND r.rank <= 3
+    WHERE r.official_club = ? AND r.status = 'ok'
+      AND (r.rank <= 3 OR (r.championship IS NOT NULL AND r.national_rank <= 3))
       AND NOT (r.category LIKE 'bahn%' AND EXISTS (
         SELECT 1 FROM result r2
         WHERE r2.stage_id = r.stage_id AND r2.category NOT LIKE 'bahn%'))
     ORDER BY date DESC`, [name]);
 
+  const isOm = medalType === "om";
   const years = [...new Set(allPodiums.map((r) => r.date.slice(0, 4)))].sort((a, b) => b - a);
-  const podiums = year ? allPodiums.filter((r) => r.date.startsWith(year)) : allPodiums;
-  const gold = podiums.filter((r) => r.rank === 1).length;
-  const silver = podiums.filter((r) => r.rank === 2).length;
-  const bronze = podiums.filter((r) => r.rank === 3).length;
+  const typeFiltered = isOm
+    ? allPodiums.filter((r) => r.championship && r.national_rank <= 3)
+    : allPodiums.filter((r) => r.rank <= 3);
+  const podiums = year ? typeFiltered.filter((r) => r.date.startsWith(year)) : typeFiltered;
+  const medalRank = (r) => (isOm ? r.national_rank : r.rank);
+  const gold = podiums.filter((r) => medalRank(r) === 1).length;
+  const silver = podiums.filter((r) => medalRank(r) === 2).length;
+  const bronze = podiums.filter((r) => medalRank(r) === 3).length;
 
-  const chip = (val, label) => `<a class="chip ${(!year && !val) || year === val ? "active" : ""}"
-      href="#/club/${encodeURIComponent(name)}${val ? "/" + val : ""}">${label}</a>`;
+  const yearChip = (val, label) => `<a class="chip ${(!year && !val) || year === val ? "active" : ""}"
+      href="#/club/${encodeURIComponent(name)}${val ? "/" + val : ""}${isOm ? "/om" : ""}">${label}</a>`;
+  const typeChip = (val, label) => `<a class="chip ${isOm === val ? "active" : ""}"
+      href="#/club/${encodeURIComponent(name)}${year ? "/" + year : ""}${val ? "/om" : ""}">${label}</a>`;
+
+  let tableHtml;
+  if (isOm) {
+    // one row per runner: Gold/Silber/Bronze/Summe medal counts, sorted like
+    // a championship table (gold, then silver, then bronze), with a shared
+    // rank number for ties - plus the ÖSTM-only subset of those same medals
+    // broken out in "G-S-B" form, since ÖSTM is the more prestigious title
+    // within the combined ÖM/ÖSTM count rather than a separate total
+    const byPerson = new Map();
+    for (const r of podiums) {
+      if (!byPerson.has(r.person_id)) {
+        byPerson.set(r.person_id, {
+          person_id: r.person_id, person_name: r.person_name,
+          gold: 0, silver: 0, bronze: 0, ostmGold: 0, ostmSilver: 0, ostmBronze: 0,
+          entries: [],
+        });
+      }
+      const p = byPerson.get(r.person_id);
+      const mr = r.national_rank;
+      if (mr === 1) p.gold++; else if (mr === 2) p.silver++; else if (mr === 3) p.bronze++;
+      if (r.championship === "ÖSTM") {
+        if (mr === 1) p.ostmGold++; else if (mr === 2) p.ostmSilver++; else if (mr === 3) p.ostmBronze++;
+      }
+      p.entries.push(r);
+    }
+    const people = [...byPerson.values()].sort((a, b) =>
+      b.gold - a.gold || b.silver - a.silver || b.bronze - a.bronze
+      || a.person_name.localeCompare(b.person_name, "de-AT"));
+    let place = 0, prevKey = null;
+    people.forEach((p, i) => {
+      const key = `${p.gold}-${p.silver}-${p.bronze}`;
+      if (key !== prevKey) { place = i + 1; prevKey = key; }
+      p.place = place;
+      p.entries.sort((a, b) => a.national_rank - b.national_rank || b.date.localeCompare(a.date));
+    });
+    const medalLabel = { 1: "Gold", 2: "Silber", 3: "Bronze" };
+
+    tableHtml = `
+    <table>
+      <thead><tr>
+        <th class="num"></th><th>Läufer:in</th><th class="num">Gold</th><th class="num">Silber</th>
+        <th class="num">Bronze</th><th class="num">Summe</th><th class="num">ÖSTM</th>
+      </tr></thead>
+      <tbody>${people.length ? people.map((p) => `
+        <tr class="expandable" data-toggle="${p.person_id}">
+          <td class="num dim">${p.place}.</td>
+          <td><a href="#/runner/${p.person_id}">${esc(p.person_name)}</a> <span class="expand-icon">▸</span></td>
+          <td class="num">${p.gold || ""}</td>
+          <td class="num">${p.silver || ""}</td>
+          <td class="num">${p.bronze || ""}</td>
+          <td class="num"><b>${p.gold + p.silver + p.bronze}</b></td>
+          <td class="num nowrap">${p.ostmGold || p.ostmSilver || p.ostmBronze ? `${p.ostmGold}-${p.ostmSilver}-${p.ostmBronze}` : ""}</td>
+        </tr>
+        <tr class="detail-row" data-detail="${p.person_id}" hidden>
+          <td colspan="7">
+            <ul class="medal-events">${p.entries.map((e) => `
+              <li><b>${medalLabel[e.national_rank]}</b>${e.championship ? ` <span class="badge">${e.championship}</span>` : ""} ·
+                <a href="#/event/${e.event_id}">${esc(e.event_title)}</a> ·
+                <span class="dim">${esc(e.category_full || e.category)} · ${fmtDate(e.date)}</span></li>`).join("")}
+            </ul>
+          </td>
+        </tr>`).join("") : `<tr><td colspan="7" class="dim">Keine Podestplätze</td></tr>`}
+      </tbody>
+    </table>`;
+  } else {
+    tableHtml = `
+    <table>
+      <thead><tr>
+        <th>Datum</th><th>Wettkampf</th><th>Kategorie</th><th class="num">Platz</th><th class="hide-sm">Läufer:in</th>
+      </tr></thead>
+      <tbody>${podiums.length ? podiums.map((r) => `
+        <tr>
+          <td class="dim">${fmtDate(r.date)}</td>
+          <td><a href="#/event/${r.event_id}">${esc(r.event_title)}</a></td>
+          <td>${esc(r.category_full || r.category)}${r.championship ? ` <span class="badge">${r.championship}</span>` : ""}${r.result_kind && r.result_kind !== "individual" ? ` <span class="badge">${{ relay: "Staffel", pair: "Paar", team: "Mannschaft" }[r.result_kind] || r.result_kind}</span>` : ""}</td>
+          <td class="num"><span class="rank ${r.rank === 1 ? "rank-1" : ""}">${r.rank}</span></td>
+          <td class="hide-sm"><a href="#/runner/${r.person_id}">${esc(r.person_name)}</a></td>
+        </tr>`).join("") : `<tr><td colspan="5" class="dim">Keine Podestplätze</td></tr>`}
+      </tbody>
+    </table>`;
+  }
 
   app.innerHTML = `
     <div class="cat-head">
@@ -421,23 +514,26 @@ function viewClub(name, year) {
     </div>
     <h2>Medaillenspiegel</h2>
     <div class="chips">
-      ${chip(null, "Alle")}
-      ${years.map((y) => chip(y, y)).join("")}
+      ${typeChip(false, "Alle Medaillen")}
+      ${typeChip(true, "ÖM / ÖSTM")}
     </div>
-    <table>
-      <thead><tr>
-        <th>Datum</th><th>Wettkampf</th><th>Kategorie</th><th class="num">Platz</th><th class="hide-sm">Läufer:in</th>
-      </tr></thead>
-      <tbody>${podiums.length ? podiums.map((r) => `
-        <tr>
-          <td class="dim">${fmtDate(r.date)}</td>
-          <td><a href="#/event/${r.event_id}">${esc(r.event_title)}</a></td>
-          <td>${esc(r.category_full || r.category)}${r.result_kind && r.result_kind !== "individual" ? ` <span class="badge">${{ relay: "Staffel", pair: "Paar", team: "Mannschaft" }[r.result_kind] || r.result_kind}</span>` : ""}</td>
-          <td class="num"><span class="rank ${r.rank === 1 ? "rank-1" : ""}">${r.rank}</span></td>
-          <td class="hide-sm"><a href="#/runner/${r.person_id}">${esc(r.person_name)}</a></td>
-        </tr>`).join("") : `<tr><td colspan="5" class="dim">Keine Podestplätze</td></tr>`}
-      </tbody>
-    </table>`;
+    <div class="chips">
+      ${yearChip(null, "Alle")}
+      ${years.map((y) => yearChip(y, y)).join("")}
+    </div>
+    ${tableHtml}`;
+
+  if (isOm) {
+    app.querySelectorAll("tr.expandable").forEach((row) => {
+      row.addEventListener("click", (ev) => {
+        if (ev.target.closest("a")) return;
+        const detail = app.querySelector(`tr.detail-row[data-detail="${row.dataset.toggle}"]`);
+        if (!detail) return;
+        detail.hidden = !detail.hidden;
+        row.classList.toggle("expanded", !detail.hidden);
+      });
+    });
+  }
 }
 
 function viewClubDns(name, yearParam, modeParam) {
@@ -552,7 +648,9 @@ function route() {
   else if ((m = hash.match(/^#\/club\/([^/]+)\/dns(?:\/(\d{4}|alle))?(?:\/(event|runner))?/))) {
     viewClubDns(decodeURIComponent(m[1]), m[2], m[3]); setActiveNav("clubs");
   }
-  else if ((m = hash.match(/^#\/club\/([^/]+)(?:\/(\d{4}))?/))) { viewClub(decodeURIComponent(m[1]), m[2]); setActiveNav("clubs"); }
+  else if ((m = hash.match(/^#\/club\/([^/]+)(?:\/(\d{4}))?(?:\/(om))?/))) {
+    viewClub(decodeURIComponent(m[1]), m[2], m[3]); setActiveNav("clubs");
+  }
   else if ((m = hash.match(/^#\/clubs/))) { viewClubs(); setActiveNav("clubs"); }
   else { viewHome(); setActiveNav(); }
   window.scrollTo(0, 0);

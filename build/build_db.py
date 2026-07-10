@@ -59,7 +59,15 @@ CREATE TABLE result (
     course_length_m INTEGER, course_climb_m INTEGER, course_controls INTEGER,
     result_kind TEXT NOT NULL DEFAULT 'individual',  -- individual|pair|relay
     note TEXT,                       -- e.g. "Partner: X" / "Staffel Y, Leg N"
-    source TEXT NOT NULL             -- anne-api|sportsoftware-html|...
+    source TEXT NOT NULL,            -- anne-api|sportsoftware-html|...
+    championship TEXT,               -- ÖM|ÖSTM, when this (stage, category)
+                                      -- is a genuine Austrian championship
+    national_rank INTEGER            -- placement among ONLY championship-
+                                      -- eligible (Austrian) finishers, which
+                                      -- can differ from the overall race
+                                      -- `rank` when a foreign/ineligible
+                                      -- competitor placed ahead - see the
+                                      -- national-rank computation in main()
 );
 CREATE INDEX idx_result_person ON result(person_id);
 CREATE INDEX idx_result_stage_cat ON result(stage_id, category);
@@ -95,6 +103,211 @@ def clean_club(name):
     if not name:
         return name
     return CLUB_JUNK_PREFIX_RE.sub("", name).strip()
+
+
+# ANNE's structured API tags every result row with its own 'championship'
+# list, keyed by championshipShortName - not just ÖM/ÖSTM (the genuine
+# Austrian Championship / Staatsmeisterschaft) but also regional/other ones
+# (BMS, NÖ MS, NÖ LMS, Stadt-MS, SBG LMS, STM) that must NOT count here.
+NATIONAL_CHAMPIONSHIPS = {"ÖM", "ÖSTM"}
+
+
+def anne_championship(row):
+    for c in (row.get("championship") or []):
+        sn = c.get("championshipShortName")
+        if sn in NATIONAL_CHAMPIONSHIPS:
+            return sn
+    return None
+
+
+# Fallback for legacy events where no result row anywhere carries a champion
+# annotation to detect at all (confirmed by hand: several real ÖM/ÖSTM-titled
+# exports simply never print one) - the event's own title is the only signal
+# left. ÖM = Österreichische Meisterschaft, ÖSTM = Österreichische
+# Staatsmeisterschaft; a title spelling out both ("ÖSTM/ÖM ...", "ÖSTM &
+# ÖM ...") or the parenthetical "Ö(ST)M" form grants both at once, while a
+# title with only one grants only that one - confirmed against events that
+# *do* have per-row annotations (e.g. "ÖSTM Mittel (6.AC Mittel)" only ever
+# tags the Elite category ÖSTM, never ÖM elsewhere in that same race).
+OESTM_TITLE_RE = re.compile(r"(?i)ö\(?st\)?m")
+OM_TITLE_RE = re.compile(r"(?i)(?<![a-zäöüß])öm(?![a-zäöüß])")
+COMBINED_TITLE_RE = re.compile(r"(?i)ö\(st\)m")
+
+
+def classify_title_championships(title):
+    if not title:
+        return set()
+    if COMBINED_TITLE_RE.search(title):
+        return {"ÖM", "ÖSTM"}
+    types = set()
+    if OESTM_TITLE_RE.search(title):
+        types.add("ÖSTM")
+    if OM_TITLE_RE.search(title):
+        types.add("ÖM")
+    return types
+
+
+# Which categories are actually eligible, learned from every category that a
+# real per-row annotation already confirmed (see the accompanying research):
+# ÖSTM only ever lands on an Elite/near-elite category (D21E/H21E, D19-/H19-,
+# "Allgemeine Klasse", "Staatsmeisterschaft Damen/Herren"); ÖM spans ordinary
+# age classes starting at the "12 and under" bracket (D-12/H-12/D12 etc.) -
+# never younger, and never non-competitive groupings (Bahn course listings,
+# Neulinge/Familie/Hobby fun categories, school Mannschaft rosters, ...).
+ELITE_CAT_RE = re.compile(
+    r"(?i)\belite\b|allgemeine\s*klasse|staatsmeisterschaft|"
+    r"(?<![a-zäöü0-9])(1[6-9]|2[01])e(?![a-zäöü0-9])")
+SPECIAL_OM_CAT_RE = re.compile(r"(?i)^allgemein$|mixed\s+(jugend|masters)")
+CAT_AGE_NUM_RE = re.compile(r"(?<!\d)(\d{1,3})(?!\d)")  # isolated 1-3 digit
+# numbers only, so a bare \d{1,3} scan doesn't fragment a 4-digit year
+# ("2025" -> "202"+"5") into a bogus, wildly-too-young age match
+EXCLUDE_CAT_RE = re.compile(
+    r"(?i)\bbahn\b|neuling|familie|ultimate|hobby|schnupper|mannschaft|"
+    r"\bak\b|gesamt(?!alter)|anf[aä]nger|\bdirekt\b|ohne\s*wertung|training|"
+    r"einsteiger|jedermann|fun\b|\bkurz\b|\boffen\b|"
+    # knock-out sprint qualification rounds ("H21-E - Viertelfinale 5",
+    # "... Halbfinale B"): a heat placement is not a final ranking - only
+    # the event's own "... - Finale" category (unaffected by this pattern)
+    # is. Confirmed real: event 4792 wrongly picked up "2nd in Halbfinale B"
+    # as an ÖM medal once title fallback started gating per category instead
+    # of per whole stage (see apply_title_championship_fallback).
+    r"viertelfinale|halbfinale")
+
+
+def category_min_age(category):
+    nums = [int(n) for n in CAT_AGE_NUM_RE.findall(category)]
+    return min(nums) if nums else None
+
+
+def is_om_eligible_category(category):
+    if EXCLUDE_CAT_RE.search(category):
+        return False
+    # some exports name the category after the championship itself
+    # ("ÖSTM SKI-O Mittel 2025 Damen") rather than splitting by age at all -
+    # trust that label directly rather than falling through to the age
+    # heuristic, which has nothing to extract from a category like that
+    types = classify_title_championships(category)
+    if types:
+        return True
+    age = category_min_age(category)
+    # The senior/open Elite bracket (D21E/H21E, "ab 21 Elite", "Allgemeine
+    # Klasse", "Staatsmeisterschaft") is deliberately excluded here, even
+    # though its age (21, or unstated for the name-only variants) would
+    # otherwise clear the >= 12 floor below: that bracket can only ever earn
+    # ÖSTM, never plain ÖM - a title-fallback event whose title carries ÖM
+    # but not ÖSTM (e.g. "7.AC ÖM Mitteldistanz") still must not tag it ÖM
+    # (see is_ostm_eligible_category for the ÖSTM side). Junior "bis 16/18/20
+    # Elite" brackets are unaffected - they're genuinely ÖM-eligible - since
+    # only the age-21-or-unstated (name-only) case is treated as senior here.
+    if ELITE_CAT_RE.search(category) and (age is None or age >= 21):
+        return False
+    if SPECIAL_OM_CAT_RE.search(category):
+        return True
+    return age is not None and age >= 12
+
+
+def is_ostm_eligible_category(category):
+    if EXCLUDE_CAT_RE.search(category):
+        return False
+    if "ÖSTM" in classify_title_championships(category):
+        return True
+    age = category_min_age(category)
+    # Same senior-only restriction as is_om_eligible_category's ELITE_CAT_RE
+    # check, mirrored: a bare "Elite" match must not sweep in a YOUTH Elite
+    # bracket ("Damen bis 16 Elite") just because the literal word is
+    # present - confirmed false by hand (event 4837, "ÖSTM Mittel am 14.9.":
+    # the excel record's only medals there are D21E/H21E, no "bis 16 Elite"
+    # at all). age is None for the genuinely senior, un-aged spellings
+    # ("Allgemeine Klasse", "Staatsmeisterschaft Damen/Herren"), so those
+    # still pass.
+    if ELITE_CAT_RE.search(category) and (age is None or age >= 21):
+        return True
+    # every real ÖSTM category confirmed by per-row detection is exactly age
+    # 19 or 21 (D19-/H19-, D21E/H21E and the like) - not a range, because a
+    # nearby age this dataset actually uses for a *different*, ÖM-only
+    # bracket would otherwise slip in too: Ski-O's "bis 20"/"H-20" near-elite
+    # youth class (confirmed ÖM, not ÖSTM, by real per-row detection at
+    # event 4894) has age 20, which a bare 19-21 range would wrongly catch.
+    # An upper bound matters at all (vs. a bare ">= 19") because a *relay*
+    # category can be named after the TEAM's combined age ("Damen ab 120" -
+    # three runners summing to 120+, a masters division, confirmed real but
+    # ÖM not ÖSTM) rather than an individual's.
+    return age in (19, 21)
+
+
+# Events whose title claims ÖM/ÖSTM but whose actual attached results don't
+# back it up - confirmed by hand, not something classify_title_championships
+# can tell from the title alone. Event 4783 ("ÖM Nacht und 1.AC (Sprint)")
+# was a two-day meet; only the non-championship 1.AC Sprint day produced any
+# results at all, the ÖM Nacht half never happened / was never published.
+TITLE_FALLBACK_EXCLUDE_EVENTS = {4783}
+
+# Competitors confirmed by hand to be foreign/ineligible for the Austrian
+# title despite carrying a championship tag, for cases the automated
+# pipeline can't catch on its own: person.nationality is too sparse and
+# occasionally wrong to trust (see the earlier "Vera Arbter" incident), and
+# champion_rank only excludes someone ranked BETTER than the real champion -
+# it has no way to know a finisher ranked BELOW the champion, and otherwise
+# indistinguishable from a genuine Austrian silver/bronze medalist, is also
+# ineligible. Keyed by (event_id, name exactly as that event's own results
+# spell it) to rule out any risk of an unrelated same-named person elsewhere
+# being caught by a broader match.
+KNOWN_INELIGIBLE_RESULTS = {
+    (4837, "Milja Väätäjä"),  # Paimion Rasti, Finland - ÖSTM Mittel, Damen ab 21 Elite, rank 2
+}
+
+
+def apply_title_championship_fallback(cur):
+    """Only touches a (stage, category) with zero rows already carrying a
+    championship tag (i.e. no per-row annotation was found anywhere in that
+    category) - including relay categories, e.g. a PDF "Staffel" export
+    whose team-announcement text (if any) parse_relay_pdf doesn't itself
+    capture. Gated per category, not per whole stage: a stage can merge
+    several source files with different, partial per-row-detection coverage
+    (e.g. event 4894 - one file real-annotates some brackets, a second,
+    cleaner file for other brackets has no annotation mechanism of its own
+    at all), so "some category in this stage already has a real tag"
+    doesn't mean every OTHER category in it does too. The same age-
+    eligibility heuristic learned from real per-row detections applies; it's
+    known to miss a handful of relay-specific exceptions with a lower age
+    floor (a youth relay can carry full ÖSTM status - see
+    is_ostm_eligible_category's docstring) - those already have real per-row
+    detection wherever the data supports it, so this fallback never needs to
+    cover them."""
+    cur.execute("""
+        SELECT DISTINCT s.id, r.category, e.title, e.id FROM result r
+        JOIN stage s ON s.id = r.stage_id
+        JOIN event e ON e.id = s.event_id
+        WHERE r.status = 'ok' AND r.result_kind IN ('individual', 'relay')
+          AND NOT EXISTS (SELECT 1 FROM result r2
+                            WHERE r2.stage_id = s.id AND r2.category = r.category
+                              AND r2.championship IS NOT NULL)
+    """)
+    candidates = cur.fetchall()
+    n = 0
+    for sid, category, title, eid in candidates:
+        if eid in TITLE_FALLBACK_EXCLUDE_EVENTS:
+            continue
+        types = classify_title_championships(title)
+        if not types:
+            continue
+        if "ÖSTM" in types and is_ostm_eligible_category(category):
+            champ = "ÖSTM"
+        elif "ÖM" in types and is_om_eligible_category(category):
+            champ = "ÖM"
+        else:
+            continue
+        # rank IS NOT NULL: a relay/pair leg can be status='ok' (that runner
+        # personally punched every control) while the TEAM still has no rank
+        # at all, because a teammate on another leg mispunched - the whole
+        # team is unplaced then, and none of its members should carry a
+        # championship tag regardless of their own leg's status.
+        cur.execute("""UPDATE result SET championship = ?
+                        WHERE stage_id = ? AND category = ? AND status = 'ok'
+                          AND rank IS NOT NULL
+                          AND result_kind IN ('individual', 'relay')""", (champ, sid, category))
+        n += cur.rowcount
+    return n
 
 
 OFFICIAL_CLUBS_PATH = ROOT / "data" / "official_clubs.json"
@@ -395,7 +608,7 @@ def load_events(cur):
 RESULT_COLS = ("stage_id", "person_id", "category", "category_full", "club", "official_club",
                "rank", "status", "time_s", "time_behind_s", "out_of_competition",
                "course_length_m", "course_climb_m", "course_controls",
-               "result_kind", "note", "source")
+               "result_kind", "note", "source", "championship")
 
 
 def insert_result(cur, **kw):
@@ -494,7 +707,7 @@ def load_anne_results(cur, events, persons, stage_ids):
                           course_length_m=course.get("length"),
                           course_climb_m=course.get("climb"),
                           course_controls=course.get("controlCount"),
-                          source="anne-api")
+                          source="anne-api", championship=anne_championship(r))
             n += 1
     return n
 
@@ -511,6 +724,7 @@ def insert_anne_relay(cur, persons, sid, cat, team):
         names.append(nm if is_valid_name(nm) else None)
 
     team_name = clean_club(team.get("teamName") or team.get("clubName") or "")
+    championship = anne_championship(team)
     n = 0
     prev_cum = 0
     for m, nm in zip(members, names):
@@ -540,7 +754,8 @@ def insert_anne_relay(cur, persons, sid, cat, team):
                       status=ANNE_STATUS.get(m.get("classification")
                                              or team.get("classification"), "unknown"),
                       time_s=leg_time, result_kind="relay",
-                      note=" · ".join(note_bits), source="anne-api")
+                      note=" · ".join(note_bits), source="anne-api",
+                      championship=championship)
         n += 1
     return n
 
@@ -628,7 +843,8 @@ def load_legacy_results(cur, events, persons, stage_ids, anne_event_ids):
                               course_length_m=cat.get("courseLengthM"),
                               course_climb_m=cat.get("courseClimbM"),
                               course_controls=cat.get("courseControls"),
-                              result_kind=kind, note=note, source=doc["source"])
+                              result_kind=kind, note=note, source=doc["source"],
+                              championship=r.get("championship"))
                 n += 1
     return n
 
@@ -645,15 +861,24 @@ def main():
     stage_ids = set()
 
     def has_usable_names(path):
+        """Mirrors the exact validity check load_anne_results() applies per
+        row (is_valid_name + the 'empty' placeholder check), not just a bare
+        letters-present regex - a file where every single row is the literal
+        placeholder 'empty' as lastName (seen for real, e.g. event 4884)
+        would otherwise pass a looser check, wrongly marking the event as
+        having usable ANNE data and blocking the legacy-attachment fallback
+        even though load_anne_results goes on to discard every one of those
+        rows anyway, leaving the event with zero results either way."""
         try:
             rows = json.loads(path.read_text())
         except Exception:
             return False
         if not rows or any(r.get("teamMembers") for r in rows):
             return True  # empty, or a relay/team (handled via teamMembers)
-        return any(re.search(r"[A-Za-zÀ-ÿ]{2,}",
-                              f"{r.get('firstName') or ''} {r.get('lastName') or ''}")
-                   for r in rows)
+        return any(
+            is_valid_name(name := clean_name(f"{r.get('firstName') or ''} {r.get('lastName') or ''}".strip()))
+            and "empty" not in name.lower()
+            for r in rows)
 
     # a few events flagged hasOfficialResults=True actually carry unusable API
     # data (SI-card numbers as names, e.g. event 1127) — fall back to their
@@ -761,6 +986,92 @@ def main():
           )
     """)
 
+    # Anyone ranked BETTER (a lower number) than the confirmed national
+    # champion within the same (stage, category) is presumptively foreign/
+    # ineligible for the Austrian title - that's exactly why the source
+    # numbered the champion "2." or "3." instead of "1." in the first place
+    # (see parse_champion_annotation). Snapshot that boundary before
+    # propagating, so a foreign finisher who beat the champion doesn't
+    # inherit the tag too.
+    cur.execute("""
+        CREATE TEMP TABLE champion_rank AS
+        SELECT stage_id, category, MIN(rank) AS champ_rank
+        FROM result
+        WHERE championship IS NOT NULL AND status = 'ok' AND rank IS NOT NULL
+        GROUP BY stage_id, category
+    """)
+
+    # A legacy export only tags the ONE row carrying the champion annotation
+    # with its ÖM/ÖSTM classification; ANNE's structured API already tags
+    # every row of a championship category individually. Either way, the
+    # medal table needs the whole category marked, so fan the tag out to
+    # every other "ok" row sharing the same (stage, category) at or below
+    # the champion's own rank once any one of them has it - a no-op for
+    # ANNE categories, which are already fully tagged.
+    cur.execute("""
+        UPDATE result SET championship = (
+            SELECT r2.championship FROM result r2
+            WHERE r2.stage_id = result.stage_id AND r2.category = result.category
+              AND r2.championship IS NOT NULL LIMIT 1)
+        WHERE status = 'ok' AND championship IS NULL
+          AND rank >= COALESCE((SELECT champ_rank FROM champion_rank cr
+                                 WHERE cr.stage_id = result.stage_id AND cr.category = result.category), 1)
+          AND EXISTS (
+            SELECT 1 FROM result r3
+            WHERE r3.stage_id = result.stage_id AND r3.category = result.category
+              AND r3.championship IS NOT NULL)
+    """)
+
+    cur.execute("DROP TABLE champion_rank")
+
+    n_title_fallback = apply_title_championship_fallback(cur)
+
+    # (Deliberately not also excluding by person.nationality: that field is
+    # sparse and, where present, not always reliable - e.g. a long-tenured
+    # Austrian club runner on record with nationality='CHE', almost
+    # certainly a data error upstream. Trusting it here would wipe out that
+    # person's entire medal history from one bad value, a much bigger risk
+    # than the rare case it would catch that champion_rank doesn't already.)
+    for eid, pname in KNOWN_INELIGIBLE_RESULTS:
+        cur.execute("""
+            UPDATE result SET championship = NULL
+            WHERE championship IS NOT NULL
+              AND stage_id IN (SELECT id FROM stage WHERE event_id = ?)
+              AND person_id IN (SELECT id FROM person WHERE name = ?)
+        """, (eid, pname))
+
+    # national_rank: placement among ONLY the finishers still championship-
+    # tagged after the exclusions above, which is what the medal table (Gold/
+    # Silber/Bronze) should key off instead of the overall race `rank` - a
+    # foreign/ineligible finisher who placed ahead no longer shifts the real
+    # champion down to "silver". Deliberately no id-based tiebreak for equal
+    # `rank`: a relay/pair team's members all share one identical rank (they
+    # ARE the same result, not separate competitors), so counting only
+    # STRICTLY lower ranks as "ahead" gives every teammate the same, correct
+    # national_rank - an id-based tiebreak previously split them apart,
+    # arbitrarily bumping one teammate to "silver" for a gold-medal team.
+    # COUNT(DISTINCT r2.rank), not COUNT(*): a relay category tags every row
+    # of every team (so the medal table's rank<=3 filter can still find a
+    # team ranked 3rd overall even though most rows aren't medal-relevant at
+    # all), so counting raw ROWS ahead - 3 members each for however many
+    # teams placed better - triples/n-tuples the count instead of counting
+    # the number of teams (a plain COUNT(*) put a 3rd-place trio's own
+    # national_rank at 7, not 3, once two 3-person teams outranked them).
+    # rank IS NOT NULL on both sides: a NULL rank (unplaced - e.g. a relay
+    # team with a mispunched leg) must never compute a national_rank at all
+    # ('r2.rank < result.rank' with either side NULL is neither true nor
+    # false in SQL, so it silently drops out of the COUNT rather than
+    # erroring - a bare championship-tagged, unranked row would otherwise
+    # get national_rank = 1, "beating" everyone, since COUNT(...) = 0 + 1).
+    cur.execute("""
+        UPDATE result SET national_rank = (
+            SELECT COUNT(DISTINCT r2.rank) + 1 FROM result r2
+            WHERE r2.stage_id = result.stage_id AND r2.category = result.category
+              AND r2.status = 'ok' AND r2.championship IS NOT NULL
+              AND r2.rank IS NOT NULL AND r2.rank < result.rank)
+        WHERE championship IS NOT NULL AND status = 'ok' AND rank IS NOT NULL
+    """)
+
     # compute time_behind for legacy rows from winner time per category
     cur.execute("""
         UPDATE result SET time_behind_s = time_s - (
@@ -772,7 +1083,8 @@ def main():
     con.commit()
     for table in ("event", "stage", "person", "result"):
         print(table, cur.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
-    print(f"api results: {n_api}, legacy results: {n_legacy}")
+    print(f"api results: {n_api}, legacy results: {n_legacy}, "
+          f"championship rows from title fallback: {n_title_fallback}")
     cur.execute("VACUUM")
     con.close()
     gz_path = DB_PATH.with_suffix(".db.gz")

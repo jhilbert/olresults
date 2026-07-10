@@ -23,6 +23,112 @@ MANUAL_ATTACHMENT_OVERRIDES = {
     1303: [("http://www.hsvwrn-ol.at/german/events/ergebnisse/2015/wintertour6.htm", "")],
 }
 
+# Attachments that must not be ingested at all - not "redundant" in
+# detect_list_type()'s sense (a split-times/cumulative-standings sheet), but
+# pure garbage: parse_pdf() has no column model for a split-times report, so
+# it comes out with nonsense category names like "1:11 +0:34", a bare "17".
+# detect_list_type() doesn't catch these two - confirmed by hand, not worth
+# teaching it a whole new report shape for what's otherwise redundant with
+# the two real result PDFs for the same event anyway (see
+# MANUAL_CATEGORY_SKIP). {(event_id, fileName)}
+MANUAL_ATTACHMENT_SKIP = {
+    (4894, "event_4894_ergebnis-split-ostm-sprint-ski-o-2025.pdf"),
+    (4894, "event_4894_split-ostm-mittel-ski-o-2025.pdf"),
+}
+
+# Categories to drop from a specific attachment because a *different*
+# attachment of the same physical race already provides a clean version of
+# that exact category, and this one doesn't - Ski-O Weekend Hochfilzen 2025
+# (event 4894) publishes each race twice: an "Austria Cup"-scored export
+# (event_4894_ergebnis-3-ac.../4-ac...html) with the full field including
+# foreign guest starters under generic category names, and a narrower
+# official "ÖSTM/ÖM"-scored PDF (event_4894_ostm-mittel/sprint...pdf, see
+# MANUAL_DOC_DATE_OVERRIDES) covering only the three championship-eligible
+# brackets per gender (Elite/21, 35+, U20) with foreign guests already
+# excluded by the organizer. Loading the AC file's version of those same
+# three brackets too would reintroduce a foreign competitor the clean PDF
+# doesn't have at all (so simple (stage, category, name) dedup can't catch
+# it - the interloper isn't a duplicate of anyone in the clean list). Every
+# *other* bracket in the AC files (35-44, 45+, youth, "Kurz", ...) has no
+# clean-PDF counterpart at all and is confirmed foreign-guest-free by hand,
+# so it loads normally. {(event_id, fileName): {category name, ...}}
+MANUAL_CATEGORY_SKIP = {
+    (4894, "event_4894_ergebnis-3-ac-2025-ski-o.html"): {
+        "Herren ab 21 Elite", "Herren ab 35", "Herren bis 20",
+        "Damen ab 21 Elite", "Damen ab 35", "Damen bis 20",
+    },
+    (4894, "event_4894_ergebnis-4-ac-2025-ski-o.html"): {
+        "Herren ab 21 Elite", "Herren ab 35", "Herren bis 20",
+        "Damen ab 21 Elite", "Damen ab 35", "Damen bis 20",
+    },
+}
+
+# SportSoftware's compact age/gender-bracket code -> the "{Damen/Herren}
+# {ab|bis N}[ Elite]" label style used throughout this dataset. Needed for a
+# results table that gives one age bracket per ROW (a "Kat" column) rather
+# than the far more common one-table-per-bracket layout with the bracket
+# named only once in a section header - see split_by_kat().
+KAT_RE = re.compile(r"^([DH])(-)?(\d+)(-)?(E)?$")
+# Same shape, unanchored: a long club name can overflow a narrow "Kat" column
+# and leak its last word(s) in ahead of the real value ("Orienteering
+# Innsbruck Imst H-20" instead of just "H-20") - take the trailing match
+# rather than trusting the whole cell.
+KAT_TOKEN_RE = re.compile(r"([DH]-?\d{1,3}-?E?)\s*$")
+
+
+def kat_to_category_name(kat):
+    m = KAT_RE.match(kat.strip())
+    if not m:
+        return kat
+    gender = "Damen" if m.group(1) == "D" else "Herren"
+    leading_dash, age, trailing_dash, elite = m.group(2), m.group(3), m.group(4), m.group(5)
+    if leading_dash:
+        label = f"bis {age}"
+    elif trailing_dash or elite:
+        label = f"ab {age}"
+    else:
+        label = age
+    if elite:
+        label += " Elite"
+    return f"{gender} {label}"
+
+
+def split_by_kat(categories):
+    """A category whose results carry a per-row 'kat' field (this dataset's
+    combined-gender-table-with-a-Kat-column PDF layout, as opposed to the
+    normal one-section-per-bracket layout) needs splitting into one category
+    per distinct kat value - otherwise every age bracket gets lumped into a
+    single category and national/overall rank is computed across the whole
+    gender field instead of within each bracket."""
+    out = []
+    for cat in categories:
+        kats = {r.get("kat") for r in cat["results"] if r.get("kat")}
+        if not kats:
+            out.append(cat)
+            continue
+        by_kat = {}
+        for r in cat["results"]:
+            k = r.pop("kat", None)
+            name = kat_to_category_name(k) if k else cat["name"]
+            sub = by_kat.setdefault(
+                name, {**cat, "name": name, "declaredStarters": None, "results": []})
+            sub["results"].append(r)
+        for sub in by_kat.values():
+            # the source "Pl" column numbers everyone in the combined table
+            # (e.g. Marina is 6th among ALL Damen), not within her own
+            # bracket (3rd among D35-) - renumber sequentially per bracket,
+            # in the order results already arrived in (itself rank-ordered,
+            # since a subsequence of a sorted sequence stays sorted), so the
+            # displayed rank matches every other category's own-bracket
+            # numbering. Rows with no rank at all (DNS/DNF) are left alone.
+            next_rank = 1
+            for r in sub["results"]:
+                if "rank" in r:
+                    r["rank"] = next_rank
+                    next_rank += 1
+        out.extend(by_kat.values())
+    return out
+
 # Same idea, but for organizers who publish a genuine SportSoftware PDF on
 # their own site with no ANNE attachment at all (ANNE only links to their
 # homepage). {event_id: [(url, fileName), ...]}
@@ -31,12 +137,39 @@ MANUAL_PDF_OVERRIDES = {
             "20240622Ergday2.pdf")],  # 7. KOLV Cup, Schiefling, 2024-06-22 (Etappe 2)
     4553: [("https://carinthian-lakecup.at/wp-content/uploads/2024/06/20240622Ergday3.pdf",
             "20240622Ergday3.pdf")],  # 8. KOLV Cup, Rosegg-Bergl, 2024-06-23 (Etappe 3)
+    # 1. AC MTBO Mittel ÖStM/ÖM, Hirzenriegel/Fehring, 2025-04-26: ANNE's own
+    # structured results for this event are 100% unusable placeholder rows
+    # (firstName/lastName like "8112114"/"empty"), and hasOfficialResults=
+    # False means anne_sync never discovers the real attachment on its own -
+    # but the file exists on ANNE's own CDN under the standard legacy-PDF
+    # naming convention, confirmed by hand.
+    4884: [("https://anne-cdn.oefol.at/public/legacy/event_4884_ergebniss-nach-kategorien-inkl-meister-in.pdf",
+            "event_4884_ergebniss-nach-kategorien-inkl-meister-in.pdf")],
 }
 
 # Events whose results live only on liveresultat.orientering.se (a live-
 # timing service some organizers use instead of a SportSoftware export) with
 # no ANNE attachment pointing there either - found by hand on the
 # organizer's own results archive. {event_id: [comp_id, ...]}
+# guess_doc_date()'s DOC_DATE_RE fallback can be fooled by a SportSoftware
+# export's own "Fr DD.MM.YYYY HH:MM" report-generation timestamp (printed
+# whenever the file was last re-exported, which can be months after the
+# actual competition) when the filename itself carries no date. Confirmed by
+# hand against the event's own dateFrom and a third-party results archive.
+# {(event_id, fileName): "YYYY-MM-DD"}
+MANUAL_DOC_DATE_OVERRIDES = {
+    # Ski-O Weekend Hochfilzen 2025: both files were re-exported together on
+    # 2025-05-23 (both print that exact "Fr 23.05.2025 11:02" timestamp), but
+    # the competition itself was 2025-02-22 (Mittel) / 2025-02-23 (Sprint) -
+    # confirmed against event 4894's own dateFrom and the ÖM medal record.
+    (4894, "event_4894_ostm-mittel-ski-o-2025.pdf"): "2025-02-22",
+    (4894, "event_4894_ostm-sprint-ski-o-2025.pdf"): "2025-02-23",
+    # Its own header prints "So 23.02.2025" (Sunday, likely a post-weekend
+    # batch re-export), but the "3.AC Mittel" content itself - confirmed by
+    # matching finish times against the Mittel PDF above - is 2025-02-22.
+    (4894, "event_4894_ergebnis-3-ac-2025-ski-o.html"): "2025-02-22",
+}
+
 MANUAL_LIVERESULTAT_COMPS = {
     4233: [30654],         # Vienna O Challenge 2024, Etappe 1 (2024-08-30)
     4440: [30655],         # Vienna O Challenge 2024, Etappe 2 (2024-08-31)
@@ -113,6 +246,82 @@ def parse_status(text):
         if key in t:
             return val
     return None
+
+
+# SportSoftware announces the Austrian champion on the winner's own row in
+# place of a plain rank number, e.g. "1. und Österr.Meister 2022" or "1. und
+# Staatsmeister 2016" - the only place this survives in a legacy export at
+# all. It isn't always rank 1: if the fastest finisher is a foreign guest or
+# otherwise ineligible, the title goes to the highest-placed eligible runner
+# instead ("2. und Österr.Meisterin 2022").
+#
+# 'Staatsmeister' (ÖSTM, the "real" national championship) only exists for
+# the near-elite/elite categories; 'Meister' qualified by "Österr(eichisch)"
+# (ÖM) spans many age categories. Both are easily confused with a same-
+# shaped regional title - Landesmeister, Bezirksmeister, Stadtmeister,
+# Bundesmeisterschaft (a schools championship, distinct from the ÖFOL one),
+# or a state adjective like "Steirische"/"NÖ"/"Wiener" - which must NOT
+# count. \b anchors "österr" to a genuine word start so a compound regional
+# name like "Niederösterreichischer Meister" (Lower Austria, a real title
+# but not the national one) doesn't false-positive just because it contains
+# "österreich" as a substring: there is no word boundary between "Nieder"
+# and "österreichischer" since they're fused into one word.
+CHAMPION_ANNOT_LEAD_RE = re.compile(r"(?i)^(\d+)\.?\s*und\s+(.+)$")
+STAATSMEISTER_RE = re.compile(r"(?i)\bstaats?meister")
+# "Österr." (double r) and "Öster." (single r) both appear as abbreviations
+# for "österreichisch" in the wild, alongside the unabbreviated word.
+OM_RE = re.compile(r"(?i)\böster(?:r|reich\w*)?\.?\s*meister")
+# A genuine announcement carries no time value of its own - it just replaces
+# the winner's rank number, on its own line/cell. One PDF export (a 2013
+# relay event) instead embeds it mid-row alongside the team's real Stnr/name/
+# time ("1 und österr. Meister 31 Naturfreunde Wien 53:04"); matching that
+# greedily would swallow and discard the team's own data. A time token is the
+# tell: bail out and let normal row parsing handle a line that has one.
+TIME_TOKEN_IN_ANNOT_RE = re.compile(r"\d{1,3}:\d{2}")
+
+
+def classify_championship_text(text):
+    """'Österr.Meister'/'Österreichischer Meister' -> 'ÖM', 'Staatsmeister'
+    (with or without an 'österreichischer' qualifier) -> 'ÖSTM', anything
+    else (regional/other title, or no title at all) -> None."""
+    if not text:
+        return None
+    if STAATSMEISTER_RE.search(text):
+        return "ÖSTM"
+    if OM_RE.search(text):
+        return "ÖM"
+    return None
+
+
+def parse_champion_annotation(text):
+    """Split a champion-annotation cell/line ('1. und Österr.Meister 2022')
+    into (rank, championship). Returns (None, None) if `text` isn't one -
+    the rank is recovered regardless of whether the title itself turns out
+    to be a recognized national one, since this text otherwise replaces the
+    plain rank number entirely and the row would lose its placement. Also
+    (None, None) if a time token follows - see TIME_TOKEN_IN_ANNOT_RE."""
+    m = CHAMPION_ANNOT_LEAD_RE.match(text.strip())
+    if not m or TIME_TOKEN_IN_ANNOT_RE.search(m.group(2)):
+        return None, None
+    return int(m.group(1)), classify_championship_text(m.group(2))
+
+
+# Yet another PDF layout (newer OE12 exports) gives the marker its own
+# "ÖStM"/"ÖM" header columns rather than replacing the rank - a table-aware
+# parser reads that cleanly (see parse_sportsoftware_pdf's column path), but
+# a text/flow parser with no notion of columns just sees it prefixed onto
+# the name field itself: "Österr. Staatsmeister Andreas Waldmann".
+CHAMPION_NAME_PREFIX_RE = re.compile(
+    r"(?i)^(öster(?:r|reich\w*)?\.?\s+(?:staats?)?meister(?:in)?)\s+(?=\S)")
+
+
+def strip_champion_name_prefix(name):
+    """(clean_name, championship) - championship is None and name unchanged
+    if there's no marker prefix to strip."""
+    m = CHAMPION_NAME_PREFIX_RE.match(name)
+    if not m:
+        return name, None
+    return name[m.end():], classify_championship_text(m.group(1))
 
 
 def detect_list_type(file_name, doc_text, is_sole_attachment=False):
@@ -326,7 +535,19 @@ def split_pair_names(name_text):
     """'Kasper Matilda / Hoffmann Marlene' -> two names. 'Hnilica Hannes/Sonja'
     (shared surname, second part is a lone forename) -> ['Hnilica Hannes',
     'Hnilica Sonja']. SportSoftware uses Lastname-Firstname order here, so the
-    shared surname is the first token."""
+    shared surname is the first token.
+
+    A distinct convention, seen in Firstname-Lastname-ordered exports of
+    run-in-pairs youth categories (D/H-12, D/H-14 night-run relays):
+    'Firstname1/Firstname2 Lastname1/Lastname2', e.g. 'Jannis/Marie
+    Binder/Egger' -> ['Jannis Binder', 'Marie Egger']. Unambiguous versus the
+    convention above because that one never has a '/' in its first
+    whitespace-separated group."""
+    groups = name_text.split()
+    if len(groups) == 2 and groups[0].count("/") == 1 and groups[1].count("/") == 1:
+        firsts = groups[0].split("/")
+        lasts = groups[1].split("/")
+        return [f"{f} {l}" for f, l in zip(firsts, lasts)]
     parts = [p.strip() for p in re.split(r"\s*/\s*", name_text) if p.strip()]
     if len(parts) <= 1:
         return parts

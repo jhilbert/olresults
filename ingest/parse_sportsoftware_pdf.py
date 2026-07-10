@@ -32,9 +32,11 @@ import warnings
 from pathlib import Path
 
 from sportsoftware_common import (
-    CAT_LINE_RE, STATUS_TAIL_RE, detect_list_type, find_trailing_club, guess_doc_date,
-    is_junk_name, load_clubs, looks_like_person, parse_course_info, parse_flow_row,
-    parse_status, parse_time, parse_time_loose,
+    CAT_LINE_RE, KAT_TOKEN_RE, MANUAL_ATTACHMENT_SKIP, MANUAL_DOC_DATE_OVERRIDES, STATUS_TAIL_RE,
+    classify_championship_text, detect_list_type, find_trailing_club, guess_doc_date,
+    is_junk_name, load_clubs, looks_like_person, split_by_kat,
+    parse_champion_annotation, parse_course_info, parse_flow_row, parse_status, parse_time,
+    parse_time_loose, strip_champion_name_prefix,
 )
 
 CLUBS = load_clubs()
@@ -63,10 +65,13 @@ def flow_results(flow):
     is_pair = len(flow["names"]) > 1
     out = []
     for nm in flow["names"]:
+        nm, championship = strip_champion_name_prefix(nm)
         if is_junk_name(nm):
             continue
         res = {"name": nm, "club": flow.get("club") or "",
                "timeText": flow.get("timeText") or flow.get("statusText") or ""}
+        if championship:
+            res["championship"] = championship
         if flow.get("rank") is not None:
             res["rank"] = flow["rank"]
         if seconds is not None:
@@ -147,6 +152,12 @@ def parse_pdf(path, allow_inline_splits=False):
     current = None
     headers = None
     head_text = ""
+    pending_rank = pending_championship = None  # from a champion-announcement
+                     # line ("1. und Staatmeister 2020"), which forms its own
+                     # word-cluster/line entirely separate from the winner's
+                     # actual row and would garble column assignment if fed
+                     # through it, so it's matched against the raw joined
+                     # line text and carried forward onto the next data row
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -188,9 +199,15 @@ def parse_pdf(path, allow_inline_splits=False):
                                    "results": []}
                         current.update(parse_course_info(m.group("rest")))
                         categories.append(current)
+                        pending_rank = pending_championship = None
                         continue
 
                     if current is None or headers is None:
+                        continue
+
+                    annot_rank, annot_championship = parse_champion_annotation(text)
+                    if annot_rank is not None:
+                        pending_rank, pending_championship = annot_rank, annot_championship
                         continue
 
                     # Prefer a text parse anchored on the known-club dictionary:
@@ -201,7 +218,18 @@ def parse_pdf(path, allow_inline_splits=False):
                     # the column parse below.
                     flow = parse_flow_row(text, CLUBS)
                     if valid_flow(flow):
-                        current["results"].extend(flow_results(flow))
+                        rows = flow_results(flow)
+                        if pending_rank is not None:
+                            # the champion announcement stole this row's own
+                            # Pl, leaving a single leading integer that
+                            # parse_flow_row would otherwise misread as the
+                            # rank when it's actually just the Stnr
+                            for r in rows:
+                                r["rank"] = pending_rank
+                                if pending_championship:
+                                    r["championship"] = pending_championship
+                            pending_rank = pending_championship = None
+                        current["results"].extend(rows)
                         continue
 
                     rec = assign_columns(line, headers)
@@ -238,8 +266,36 @@ def parse_pdf(path, allow_inline_splits=False):
                         "club": (rec.get("Verein") or rec.get("Verein/Schule") or "").strip(),
                         "timeText": time_text,
                     }
+                    # a "Kat" column means this table holds every age bracket
+                    # for one gender at once (one row per bracket-member)
+                    # rather than the usual one-section-per-bracket layout -
+                    # split_by_kat() breaks it back apart after the page loop
+                    km = KAT_TOKEN_RE.search((rec.get("Kat") or "").strip())
+                    if km:
+                        result["kat"] = km.group(1)
+                    # a newer OE12 layout gives the champion marker its own
+                    # dedicated "ÖStM"/"ÖM" header columns instead of folding
+                    # it into the Pl cell - "Österr. Staatsmeister"/"Österr.
+                    # Meister" prints starting at that column's x-position but
+                    # is wide enough to spill across both, so it lands split
+                    # across the two rec keys rather than in just one
+                    marker = f"{rec.get('ÖStM', '')} {rec.get('ÖM', '')}".strip()
+                    if marker:
+                        championship = classify_championship_text(marker)
+                        if championship:
+                            result["championship"] = championship
                     if rank_text.isdigit():
+                        # this row has its own rank after all - it wasn't the
+                        # one the pending announcement belonged to (a stray
+                        # digit elsewhere in a garbled row, say), so drop the
+                        # pending state rather than misattaching the title to
+                        # an unrelated rank
                         result["rank"] = int(rank_text)
+                    elif pending_rank is not None:
+                        result["rank"] = pending_rank
+                        if pending_championship:
+                            result["championship"] = pending_championship
+                    pending_rank = pending_championship = None
                     seconds = parse_time(time_text)
                     if seconds is None:
                         # a long club name can overflow into the time column
@@ -262,6 +318,7 @@ def parse_pdf(path, allow_inline_splits=False):
                     current["results"].append(result)
 
     categories = [c for c in categories if c["results"]]
+    categories = split_by_kat(categories)
     for c in categories:
         if c["declaredStarters"] is None:
             c["declaredStarters"] = len(c["results"])
@@ -551,18 +608,28 @@ def main():
 
     ok = empty = failed = 0
     for eid, n, f, sole_attachment in jobs:
+        if (eid, f["fileName"]) in MANUAL_ATTACHMENT_SKIP:
+            empty += 1
+            continue
         out_path = OUT / f"{eid}-{n}.json"
         pdf_path = FILES / f"{eid}-{n}.pdf"
         try:
             fetch(f["url"], pdf_path)
             cats, head_text = parse_pdf(pdf_path, allow_inline_splits=sole_attachment)
-            if not cats:
+            if RELAY_HEADER_RE.search(head_text):
+                # parse_pdf()'s flat Pl/Stnr/Name/Verein/Zeit column model
+                # doesn't understand the two-tier team+member relay layout -
+                # confirmed by hand (event 4829) that it doesn't just come up
+                # empty on one, it actively misreads team/member rows as
+                # individual data ("WAT-OL" and "AK" as runner names), so a
+                # relay header always overrides its output rather than only
+                # being consulted when parse_pdf came up empty
+                cats = parse_relay_pdf(pdf_path)
+            elif not cats:
                 # parse_pdf() only understands the fixed Pl/Stnr/Verein/Zeit
                 # column layout; other export styles need their own logic
                 # entirely (see their docstrings)
-                if RELAY_HEADER_RE.search(head_text):
-                    cats = parse_relay_pdf(pdf_path)
-                elif "Nachname Vorname" in head_text:
+                if "Nachname Vorname" in head_text:
                     cats = parse_wintertour_pdf(pdf_path)
                 else:
                     cats = parse_flowing_pdf(pdf_path)
@@ -575,7 +642,8 @@ def main():
                 "sourceUrl": f["url"],
                 "fileName": f["fileName"],
                 "listType": detect_list_type(f["fileName"], head_text, sole_attachment),
-                "docDate": guess_doc_date(f["fileName"], head_text),
+                "docDate": MANUAL_DOC_DATE_OVERRIDES.get((eid, f["fileName"]))
+                           or guess_doc_date(f["fileName"], head_text),
                 "categories": cats,
             }, ensure_ascii=False))
             ok += 1

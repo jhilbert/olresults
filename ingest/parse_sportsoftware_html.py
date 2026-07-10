@@ -23,8 +23,9 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from sportsoftware_common import (
-    CAT_LINE_RE, COURSE_RE, TIME_TOKEN_RE, detect_list_type, expand_pair_result,
-    guess_doc_date, is_junk_name, parse_course_info, parse_status, parse_time,
+    CAT_LINE_RE, COURSE_RE, MANUAL_ATTACHMENT_SKIP, MANUAL_CATEGORY_SKIP, MANUAL_DOC_DATE_OVERRIDES,
+    TIME_TOKEN_RE, classify_championship_text, detect_list_type, expand_pair_result, guess_doc_date,
+    is_junk_name, parse_champion_annotation, parse_course_info, parse_status, parse_time,
     parse_time_loose, team_results_from_pairs,
 )
 
@@ -98,6 +99,7 @@ def parse_document(html_text):
     categories = []
     current = None
     columns = None
+    pending_rank = pending_championship = None
     for table in ex.tables:
         for row in table:
             if not row or all(c in ("", "&nbsp") for c in row):
@@ -114,11 +116,30 @@ def parse_document(html_text):
                 current.update(parse_course_info(" ".join(row[1:])))
                 categories.append(current)
                 columns = None
+                pending_rank = pending_championship = None
                 continue
             if first == "Pl" or (current and "Name" in row):
                 columns = row
                 continue
             if current is None or columns is None:
+                continue
+            # champion-announcement rows come in several shapes - the whole
+            # phrase in one cell ('<td colspan=3>1. und Staatsmeister 2025'),
+            # a clean rank cell plus one wide cell for the rest ('<td>1<td
+            # colspan=100>und Österreichische Meisterin'), or a clean rank
+            # with the phrase landing in whatever header the layout's next
+            # column happens to be (Name if there's no Stnr column, Stnr if
+            # there is) - none of which line up with the real Pl/Stnr/Name/
+            # Verein/Zeit header. Rather than enumerate every cell-count
+            # shape, join the whole row and match it as one: a genuine
+            # announcement carries no time value of its own (guarded inside
+            # parse_champion_annotation), so a hybrid row that also has the
+            # winner's real name/time in a later cell correctly falls
+            # through to the normal per-cell handling below instead.
+            joined = " ".join(c for c in row if c and c != "&nbsp").strip()
+            annot_rank, annot_championship = parse_champion_annotation(joined)
+            if annot_rank is not None:
+                pending_rank, pending_championship = annot_rank, annot_championship
                 continue
             # data row: align cells to columns
             rec = dict(zip([c or f"col{i}" for i, c in enumerate(columns)], row))
@@ -148,7 +169,21 @@ def parse_document(html_text):
             }
             rank_text = rec.get("Pl", "").strip()
             if rank_text.isdigit():
+                # this row has its own rank after all - not the one the
+                # pending announcement belonged to
                 result["rank"] = int(rank_text)
+                pending_rank = pending_championship = None
+            else:
+                annot_rank, championship = parse_champion_annotation(rank_text)
+                if annot_rank is not None:
+                    result["rank"] = annot_rank
+                    if championship:
+                        result["championship"] = championship
+                elif pending_rank is not None:
+                    result["rank"] = pending_rank
+                    if pending_championship:
+                        result["championship"] = pending_championship
+                pending_rank = pending_championship = None
             seconds = parse_time_loose(time_text)
             if seconds is not None:
                 result["timeS"] = seconds
@@ -260,6 +295,9 @@ def parse_relay_document(html_text):
     current = None
     pending_team = None
     pending_rank = None
+    pending_championship = None  # ÖM/ÖSTM classified from the champion
+                     # annotation that stole pending_rank, carried onto the
+                     # team it precedes and from there onto every member
     staffel_idx = 2  # column holding the team name; some layouts omit 'Stnr',
                      # shifting it from index 2 to 1 - detected from the header
     has_stnr = True  # whether this layout has a Stnr column; lets a
@@ -292,6 +330,8 @@ def parse_relay_document(html_text):
                       "note": " · ".join(note_bits), "status": status}
             if pending_team["rank"] is not None:
                 result["rank"] = pending_team["rank"]
+            if pending_team.get("championship"):
+                result["championship"] = pending_team["championship"]
             if seconds is not None:
                 result["timeS"] = seconds
             current["results"].append(result)
@@ -306,6 +346,7 @@ def parse_relay_document(html_text):
             if m:
                 flush()
                 pending_rank = None
+                pending_championship = None
                 staffel_idx = 2
                 has_stnr = True
                 team_row_len = member_row_len = None
@@ -332,6 +373,7 @@ def parse_relay_document(html_text):
                     and not TIME_TOKEN_RE.search(joined):
                 flush()
                 pending_rank = int(first) if first.isdigit() else int(annot_m.group(1))
+                pending_championship = classify_championship_text(joined)
                 continue
 
             # A non-finishing team ('Fehlst' as its total time) gets no rank at
@@ -355,12 +397,15 @@ def parse_relay_document(html_text):
                     rank_val = pending_rank
                 else:
                     rank_val = None  # genuinely rankless (DNF) team
+                championship_val = pending_championship
                 pending_rank = None
+                pending_championship = None
                 if confident_rank and not has_stnr:
                     team_row_len = team_row_len or len(row)
                 idx = staffel_idx if len(row) > staffel_idx else (len(row) - 1)
                 team_name = row[idx].strip() if idx >= 0 and row[idx] else ""
-                pending_team = {"rank": rank_val, "name": team_name, "members": []}
+                pending_team = {"rank": rank_val, "name": team_name,
+                                 "championship": championship_val, "members": []}
                 continue
 
             if pending_team is None:
@@ -427,6 +472,9 @@ def main():
 
     ok = empty = failed = 0
     for eid, n, f, sole_attachment in jobs:
+        if (eid, f["fileName"]) in MANUAL_ATTACHMENT_SKIP:
+            empty += 1
+            continue
         out_path = OUT / f"{eid}-{n}.json"
         try:
             data = fetch(f["url"], FILES / f"{eid}-{n}.html")
@@ -447,6 +495,9 @@ def main():
                     cats = parse_text(extract_pre_blocks(text))
                 if not cats:
                     cats = parse_bracket_html(text)
+            skip_cats = MANUAL_CATEGORY_SKIP.get((eid, f["fileName"]))
+            if skip_cats:
+                cats = [c for c in cats if c["name"] not in skip_cats]
             if not cats:
                 empty += 1
                 continue
@@ -456,7 +507,8 @@ def main():
                 "sourceUrl": f["url"],
                 "fileName": f["fileName"],
                 "listType": list_type,
-                "docDate": guess_doc_date(f["fileName"], text),
+                "docDate": MANUAL_DOC_DATE_OVERRIDES.get((eid, f["fileName"]))
+                           or guess_doc_date(f["fileName"], text),
                 "categories": cats,
             }, ensure_ascii=False))
             ok += 1
