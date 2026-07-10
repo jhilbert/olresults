@@ -108,7 +108,8 @@ function viewRunner(id, year) {
     .sort((a, b) => b - a);
   const rows = year ? allRows.filter((r) => (r.stage_date || r.date_from || "").startsWith(year)) : allRows;
 
-  const finished = rows.filter((r) => r.status === "ok" && r.rank != null);
+  const countable = rows.filter((r) => !(isBahn(r.category) && r.non_bahn_count > 0));
+  const finished = countable.filter((r) => r.status === "ok" && r.rank != null);
   const wins = finished.filter((r) => r.rank === 1).length;
   const podiums = finished.filter((r) => r.rank <= 3).length;
   const clubs = [...new Set(allRows.map((r) => r.club).filter(Boolean))].slice(0, 3);
@@ -120,7 +121,7 @@ function viewRunner(id, year) {
     <h1>${esc(p.name)}</h1>
     <p class="sub">${clubs.map(esc).join(" · ")}${p.year_of_birth ? ` · Jg. ${p.year_of_birth}` : ""}</p>
     <div class="stats">
-      <div class="stat"><b>${rows.length}</b><span>Starts</span></div>
+      <div class="stat"><b>${countable.length}</b><span>Starts</span></div>
       <div class="stat"><b>${wins}</b><span>Siege</span></div>
       <div class="stat"><b>${podiums}</b><span>Podestplätze</span></div>
     </div>
