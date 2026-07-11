@@ -165,13 +165,17 @@ EXCLUDE_CAT_RE = re.compile(
     r"(?i)\bbahn\b|neuling|familie|ultimate|hobby|schnupper|mannschaft|"
     r"\bak\b|gesamt(?!alter)|anf[aä]nger|\bdirekt\b|ohne\s*wertung|training|"
     r"einsteiger|jedermann|fun\b|\bkurz\b|\boffen\b|"
-    # knock-out sprint qualification rounds ("H21-E - Viertelfinale 5",
-    # "... Halbfinale B"): a heat placement is not a final ranking - only
-    # the event's own "... - Finale" category (unaffected by this pattern)
-    # is. Confirmed real: event 4792 wrongly picked up "2nd in Halbfinale B"
-    # as an ÖM medal once title fallback started gating per category instead
-    # of per whole stage (see apply_title_championship_fallback).
-    r"viertelfinale|halbfinale")
+    # knock-out sprint qualification/consolation rounds ("H21-E -
+    # Viertelfinale 5", "... Halbfinale B", "H55- - B-Finale"): none of
+    # these are the real national ranking - only the event's own bare
+    # "... - Finale" category (the A-final; unaffected by this pattern,
+    # since "b-finale" requires the leading "b-") is. Confirmed real: event
+    # 4792 wrongly picked up "2nd in Halbfinale B" as an ÖM medal once title
+    # fallback started gating per category instead of per whole stage (see
+    # apply_title_championship_fallback), and event 4254 ("ÖM KO-Sprint",
+    # 2024-05-11) wrongly gave 2nd-in-the-B-Finale (the consolation bracket
+    # for those already eliminated from medal contention) a silver medal.
+    r"viertelfinale|halbfinale|b-finale")
 
 
 def category_min_age(category):
@@ -254,7 +258,41 @@ TITLE_FALLBACK_EXCLUDE_EVENTS = {4783}
 # being caught by a broader match.
 KNOWN_INELIGIBLE_RESULTS = {
     (4837, "Milja Väätäjä"),  # Paimion Rasti, Finland - ÖSTM Mittel, Damen ab 21 Elite, rank 2
+    (4884, "Ivan Serafini"),  # ASD Team Sky Friul, Italy - ÖM MTBO, Herren ab 40, rank 3
 }
+
+# ANNE's own championshipEligibility flag (see ingest/anne_user_eligibility.py),
+# cached per ANNE userId - the authoritative signal, since person.nationality
+# alone isn't one: several long-tenured Austrian club members are on record
+# with a foreign passport nationality (marriage, dual citizenship, historical
+# registration quirks - e.g. Vera Arbter/CHE, Marina Skern/RUS) yet hold an
+# explicit eligibility override confirmed real by their club's own medal
+# records. The cache only contains userIds ANNE itself reported a non-
+# Austrian nationality for, each mapped to True (explicit override granted -
+# eligible despite the nationality) or None (no override - not eligible).
+USER_ELIGIBILITY_PATH = RAW / "user_eligibility.json"
+
+
+def apply_championship_eligibility_overrides(cur):
+    """Strip championship from every row of a runner ANNE itself reports as
+    foreign-nationality with no eligibility override. Only touches person
+    ids present in the cache - i.e. only people ANNE told us are non-
+    Austrian; everyone else (Austrian by default, or a synthetic person id
+    with no ANNE account to check via this API at all - about half of all
+    medal-tier people, mostly pre-ANNE legacy results) is left untouched,
+    since guessing either way there would be worse than doing nothing."""
+    if not USER_ELIGIBILITY_PATH.exists():
+        return 0
+    cache = json.loads(USER_ELIGIBILITY_PATH.read_text())
+    n = 0
+    for uid, eligibility in cache.items():
+        if eligibility is True:
+            continue
+        if eligibility != "error":  # a transient fetch failure - not evidence either way
+            cur.execute("""UPDATE result SET championship = NULL
+                            WHERE championship IS NOT NULL AND person_id = ?""", (int(uid),))
+            n += cur.rowcount
+    return n
 
 
 def apply_title_championship_fallback(cur):
@@ -1026,12 +1064,12 @@ def main():
 
     n_title_fallback = apply_title_championship_fallback(cur)
 
-    # (Deliberately not also excluding by person.nationality: that field is
-    # sparse and, where present, not always reliable - e.g. a long-tenured
-    # Austrian club runner on record with nationality='CHE', almost
-    # certainly a data error upstream. Trusting it here would wipe out that
-    # person's entire medal history from one bad value, a much bigger risk
-    # than the rare case it would catch that champion_rank doesn't already.)
+    n_eligibility = apply_championship_eligibility_overrides(cur)
+
+    # KNOWN_INELIGIBLE_RESULTS remains for the cases the API can't cover:
+    # someone with no ANNE account at all (a genuinely one-off foreign
+    # guest, e.g. Milja Väätäjä/Ivan Serafini - confirmed by hand to not
+    # exist in ANNE's user database whatsoever).
     for eid, pname in KNOWN_INELIGIBLE_RESULTS:
         cur.execute("""
             UPDATE result SET championship = NULL
@@ -1084,7 +1122,8 @@ def main():
     for table in ("event", "stage", "person", "result"):
         print(table, cur.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
     print(f"api results: {n_api}, legacy results: {n_legacy}, "
-          f"championship rows from title fallback: {n_title_fallback}")
+          f"championship rows from title fallback: {n_title_fallback}, "
+          f"championship rows stripped by eligibility check: {n_eligibility}")
     cur.execute("VACUUM")
     con.close()
     gz_path = DB_PATH.with_suffix(".db.gz")

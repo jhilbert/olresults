@@ -41,6 +41,21 @@ sources are only hit for new or changed events.
 ```
 python3 ingest/anne_sync.py            # sync events + structured results
 python3 ingest/parse_sportsoftware_html.py  # parse tier-2 HTML attachments
+python3 ingest/anne_user_eligibility.py     # sync ÖM/ÖSTM championship eligibility (needs ANNE_API_KEY)
 python3 build/build_db.py              # build site/data/results.db
 cd site && python3 -m http.server 8643 # local preview
 ```
+
+### Championship (ÖM/ÖSTM) eligibility
+
+`ingest/anne_user_eligibility.py` calls ANNE's authenticated `/v1/user/:id`
+endpoint to fetch the `championshipEligibility` flag for every runner on
+record with a non-Austrian nationality - the field ÖFOL itself maintains to
+mark someone eligible for the Austrian championship despite a foreign
+passport nationality (dual citizenship, long-tenured club membership,
+etc.), which is a more reliable signal than nationality alone (see
+`build/build_db.py`'s `apply_championship_eligibility_overrides`). Requires
+an `ANNE_API_KEY` env var - a personal API key from an ANNE account with at
+least clubManager role (Settings → API Keys in the ANNE web app). Without
+the key, the script no-ops and `build_db.py` just uses whatever
+`data/raw/anne/user_eligibility.json` snapshot is already committed.
