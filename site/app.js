@@ -326,38 +326,50 @@ function setupSearch() {
 /* ---------- all events (Wettkämpfe) ---------- */
 
 function viewEvents(year) {
-  const events = query(`
-    SELECT e.id, e.title, e.location,
-           COALESCE(MIN(s.date), e.date_from) AS date,
-           COUNT(r.id) AS n
+  // One row per STAGE, not per event: a multi-day event (e.g. a 3-day
+  // festival with a separate Sprint/Middle/Long each day) is really 3
+  // distinct competitions, each with its own date and its own results -
+  // collapsing them into a single event-level row hid that (and, until a
+  // build_db.py fix, an event like that could even silently lose stages
+  // 2 and 3 to a stage-splitting bug entirely - see correct_legacy_stage_dates).
+  const stageRows = query(`
+    SELECT e.id AS event_id, e.title, e.location, s.number, s.title AS stage_title,
+           COALESCE(s.date, e.date_from) AS date, COUNT(r.id) AS n
     FROM event e JOIN stage s ON s.event_id = e.id JOIN result r ON r.stage_id = s.id
-    GROUP BY e.id ORDER BY date DESC`);
-  const years = query(`
-    SELECT substr(COALESCE(s.date, e.date_from), 1, 4) AS yr, COUNT(DISTINCT e.id) AS n
-    FROM event e JOIN stage s ON s.event_id = e.id JOIN result r ON r.stage_id = s.id
-    GROUP BY yr ORDER BY yr DESC`);
+    GROUP BY s.id ORDER BY date DESC, e.id, s.number`);
+  const stagesPerEvent = new Map();
+  for (const r of stageRows) stagesPerEvent.set(r.event_id, (stagesPerEvent.get(r.event_id) || 0) + 1);
+  const yearCounts = new Map();
+  for (const r of stageRows) {
+    const yr = (r.date || "").slice(0, 4);
+    yearCounts.set(yr, (yearCounts.get(yr) || 0) + 1);
+  }
+  const years = [...yearCounts.entries()].sort((a, b) => b[0].localeCompare(a[0]));
 
-  const shown = year ? events.filter((e) => (e.date || "").startsWith(year)) : events;
+  const shown = year ? stageRows.filter((r) => (r.date || "").startsWith(year)) : stageRows;
   const chip = (val, label, n) =>
     `<a class="chip ${(!year && !val) || year === val ? "active" : ""}"
         href="#/events${val ? "/" + val : ""}">${label}${n != null ? ` <span>${n}</span>` : ""}</a>`;
 
   app.innerHTML = `
     <h1>Wettkämpfe</h1>
-    <p class="sub">${events.length.toLocaleString("de-AT")} Wettkämpfe mit Ergebnissen${year ? ` · ${shown.length} in ${year}` : ""}.</p>
+    <p class="sub">${stageRows.length.toLocaleString("de-AT")} Wettkämpfe mit Ergebnissen${year ? ` · ${shown.length} in ${year}` : ""}.</p>
     <div class="chips">
-      ${chip(null, "Alle", events.length)}
-      ${years.map((y) => chip(y.yr, y.yr, y.n)).join("")}
+      ${chip(null, "Alle", stageRows.length)}
+      ${years.map(([yr, n]) => chip(yr, yr, n)).join("")}
     </div>
     <table>
       <thead><tr><th>Datum</th><th>Wettkampf</th><th class="hide-sm">Ort</th><th class="num">Ergebnisse</th></tr></thead>
-      <tbody>${shown.map((e) => `
+      <tbody>${shown.map((r) => {
+        const stageLabel = r.stage_title || (stagesPerEvent.get(r.event_id) > 1 ? `Etappe ${r.number}` : "");
+        return `
         <tr>
-          <td class="dim">${fmtDate(e.date)}</td>
-          <td><a href="#/event/${e.id}">${esc(e.title)}</a></td>
-          <td class="hide-sm dim">${esc(e.location || "")}</td>
-          <td class="num">${e.n}</td>
-        </tr>`).join("")}
+          <td class="dim">${fmtDate(r.date)}</td>
+          <td><a href="#/event/${r.event_id}">${esc(r.title)}</a>${stageLabel ? ` <span class="dim">· ${esc(stageLabel)}</span>` : ""}</td>
+          <td class="hide-sm dim">${esc(r.location || "")}</td>
+          <td class="num">${r.n}</td>
+        </tr>`;
+      }).join("")}
       </tbody>
     </table>`;
 }

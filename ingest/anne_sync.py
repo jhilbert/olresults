@@ -73,11 +73,21 @@ def sync_event(event, force, refresh_cutoff):
         if needs_fetch(results_path, event, force, refresh_cutoff):
             results_path.write_text(json.dumps(get(f"{BASE}/event/{eid}/results"), ensure_ascii=False))
             fetched.append("results")
-        if event.get("stageCount", 0) > 0:
-            stages_path = RAW / "stages" / f"{eid}.json"
-            if needs_fetch(stages_path, event, force, refresh_cutoff):
-                stages_path.write_text(json.dumps(get(f"{BASE}/event/{eid}/stages"), ensure_ascii=False))
-                fetched.append("stages")
+    # Not gated on hasOfficialResults/hasUnofficialResults - a legacy event
+    # (results only as PDF/HTML attachments, no structured API data at all)
+    # can still have real stage metadata worth having, and for a multi-day
+    # one it's the only reliable source of per-day dates: build_db.py's
+    # legacy path has to guess a date from each attachment's own printed
+    # header otherwise, which is really just "when this PDF/HTML was last
+    # (re)generated" - confirmed real: event 4114 ("O-Festival 2023"), a
+    # 3-day meet whose 3 separate result files were all reprinted on the
+    # same later day, so they all guessed the identical wrong date and
+    # silently collapsed into one stage instead of three.
+    if event.get("stageCount", 0) > 0:
+        stages_path = RAW / "stages" / f"{eid}.json"
+        if needs_fetch(stages_path, event, force, refresh_cutoff):
+            stages_path.write_text(json.dumps(get(f"{BASE}/event/{eid}/stages"), ensure_ascii=False))
+            fetched.append("stages")
     return eid, fetched
 
 

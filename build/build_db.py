@@ -1090,11 +1090,87 @@ def insert_anne_relay(cur, persons, sid, cat, team):
     return n
 
 
+# A SportSoftware PDF/HTML header only records when that file was last
+# (re)generated, not the actual competition date - guess_doc_date() falls
+# back to reading it anyway for a legacy file with no "ergDDMMYY..."
+# filename convention of its own. For a multi-day event, ANNE's own
+# per-stage metadata (data/raw/anne/stages/{eid}.json - see anne_sync.py)
+# has the real date for each day, just not tied to a specific attachment
+# file. Both a stage's title ("5.AC Sprint", "ÖSM 6.AC Middle Nassereith")
+# and the matching attachment's filename ("...ergebnis-5-ac-2023.pdf")
+# share the same "N.AC" Austria-Cup round number though, which is enough
+# to line them up. Confirmed real: event 4114 ("O-Festival 2023") - all 3
+# of its separate result files were reprinted on the same later day, so
+# guess_doc_date() gave them all the identical wrong date, collapsing 3
+# real stages (27/28/29 May) into 1.
+AC_ROUND_RE = re.compile(r"(\d+)[\s.-]*ac\b", re.I)
+# A second, independent way to recover the real date: some legacy
+# filenames spell it out directly ("...19-5-2019-ergebnisse.html") in a
+# D-M-YYYY/D.M.YYYY shape that doesn't match FILENAME_DATE_RE's stricter
+# 6-digit "ergDDMMYY" SportSoftware convention. Only trusted when the
+# resulting date is one of the event's own known stage dates - a random
+# D-M-YYYY-shaped number run in an unrelated filename must not get
+# promoted to a real date on a guess. Confirmed necessary: event 2675
+# ("2. AC Long und 3. AC/ÖM/ÖStM Sprint 2019") - its main results file
+# has no "N.AC" round number in its name at all (only its split-times
+# sibling does), so without this it would keep its wrong guessed date
+# while the split file - a stand-in with no club/rank data of its own,
+# see the relay/leg-times dedup-priority comment above - took over the
+# real one, leaving the real results stranded on a phantom stage.
+LEGACY_FILENAME_DATE_RE = re.compile(r"(\d{1,2})[.-](\d{1,2})[.-](\d{4})")
+
+
+def correct_legacy_stage_dates(docs, events):
+    by_event = defaultdict(list)
+    for d in docs:
+        by_event[d["eventId"]].append(d)
+    n = 0
+    for eid, event_docs in by_event.items():
+        stages_path = RAW / "stages" / f"{eid}.json"
+        if not stages_path.exists():
+            continue
+        try:
+            stages = json.loads(stages_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        if len(stages) < 2:
+            continue
+        valid_dates = {s["dateFrom"][:10] for s in stages if s.get("dateFrom")}
+        round_to_date = {}
+        for s in stages:
+            m = AC_ROUND_RE.search(s.get("title") or s.get("shortTitle") or "")
+            if m and s.get("dateFrom"):
+                round_to_date[int(m.group(1))] = s["dateFrom"][:10]
+        if not round_to_date and not valid_dates:
+            continue
+        for d in event_docs:
+            fn = d.get("fileName") or ""
+            corrected = None
+            m = AC_ROUND_RE.search(fn)
+            if m and int(m.group(1)) in round_to_date:
+                corrected = round_to_date[int(m.group(1))]
+            if not corrected:
+                dm = LEGACY_FILENAME_DATE_RE.search(fn)
+                if dm:
+                    day, month, year = dm.groups()
+                    try:
+                        iso = f"{year}-{int(month):02d}-{int(day):02d}"
+                    except ValueError:
+                        iso = None
+                    if iso in valid_dates:
+                        corrected = iso
+            if corrected and d.get("docDate") != corrected:
+                d["docDate"] = corrected
+                n += 1
+    return n
+
+
 def load_legacy_results(cur, events, persons, stage_ids, anne_event_ids):
     n = 0
     canonical = re.compile(r"^\d+-(?:club)?\d+\.json$")
     docs = [json.loads(p.read_text())
             for p in sorted(NORM.glob("*.json")) if canonical.match(p.name)]
+    correct_legacy_stage_dates(docs, events)
     # plain result lists before split-time lists, so duplicates resolve
     # in favour of the cleaner source. Also prefer a dedicated relay
     # ("Staffel") export over a same-event 'race'-listType file covering
