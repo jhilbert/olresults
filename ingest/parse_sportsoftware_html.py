@@ -24,8 +24,8 @@ from pathlib import Path
 
 from sportsoftware_common import (
     CAT_LINE_RE, COURSE_RE, MANUAL_ATTACHMENT_SKIP, MANUAL_CATEGORY_SKIP, MANUAL_DOC_DATE_OVERRIDES,
-    TIME_TOKEN_RE, classify_championship_text, detect_list_type, expand_pair_result, guess_doc_date,
-    is_junk_name, parse_champion_annotation, parse_course_info, parse_status, parse_time,
+    TIME_TOKEN_RE, classify_championship_text, detect_list_type, expand_pair_result, extract_html_title,
+    guess_doc_date, is_junk_name, parse_champion_annotation, parse_course_info, parse_status, parse_time,
     parse_time_loose, team_results_from_pairs,
 )
 
@@ -530,6 +530,7 @@ def main():
                 "listType": list_type,
                 "docDate": MANUAL_DOC_DATE_OVERRIDES.get((eid, f["fileName"]))
                            or guess_doc_date(f["fileName"], text),
+                "docTitle": extract_html_title(text),
                 "categories": cats,
             }, ensure_ascii=False))
             ok += 1

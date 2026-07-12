@@ -121,7 +121,46 @@ FLOW_CAT_RE = re.compile(r"^(?P<name>.+?)\s*\((?P<starters>\d+)(?:\s*/\s*\d+)?\)
 FLOW_CAT_PLAIN_RE = re.compile(r"^Kategorie\s+(?P<name>.+)$", re.I)
 FLOW_TIME_RE = re.compile(r"^\+?\d{1,3}:\d{2}(?::\d{2})?$")
 RANK_PREFIX_RE = re.compile(r"^\d+\.?$")
-RELAY_HEADER_RE = re.compile(r"^Pl\s+Stnr\s+Staffel\b", re.M)
+# The team-row header's own column names vary too much to match literally -
+# confirmed real across the corpus: "Pl Stnr Staffel Zeit" (plain), "Pl
+# Text1 Staffel Zeit" (a champion announcement swaps "Stnr" for the narrow
+# "Text1" column - event 3825, "Chicken Challenge ÖM/ÖStM Mixed-Sprint-
+# Staffel"), "Pl Text1 Text2 Stnr Staffel Zeit" (event 794, two announcement
+# columns), "Pl Staffel Zeit Diff." (no Stnr/Text at all - event 2022), "Pl
+# Text1 Verein Bez Zeit" (team column literally called "Verein", no
+# "Staffel" word anywhere - event 3824, "Chicken Challenge ÖM/ÖStM
+# Staffel"). What's constant across every one of these two-tier team+member
+# layouts, and never appears in a flat individual-row export, is the SECOND
+# header line right below it: "Name Jg Zeit" (the member sub-table's own
+# columns) - matching on that instead of trying to enumerate every team-row
+# column-name spelling. Each earlier narrower version of this regex missed
+# a real relay and silently mangled it into single bogus rows per category
+# ("AK"/"OLC Wienerwald" as if it were one runner) via the flat individual
+# parser instead.
+RELAY_HEADER_RE = re.compile(r"^Pl\b.*\n\s*Name\s+Jg\s+Zeit\b", re.M)
+
+# A relay team row can carry its champion announcement inline, ahead of the
+# real team name/time ("1 und ÖM Naturfreunde Wien 1 35:06") - unlike a
+# plain announcement-only row, parse_champion_annotation() deliberately
+# refuses this shape (a time token follows "und", its usual signal that the
+# row is NOT a pure announcement - see TIME_TOKEN_IN_ANNOT_RE's docstring),
+# so it has to be peeled off here before the rest of the line reaches
+# parse_flow_row(), or "und ÖM" becomes stuck to the front of the team name.
+RELAY_TEAM_ANNOT_RE = re.compile(
+    r"^(?P<rank>\d+)\.?\s+und\s+(?P<title>ÖM|ÖSTM|"
+    r"öster(?:r|reich\w*)?\.?\s*(?:staats?)?meister(?:in)?)\s+(?=\S)", re.I)
+
+# The "Pl Text1 Staffel Name Jg Zeit W Zeit" header (see RELAY_HEADER_RE)
+# prints each member's OWN leg time and the team's cumulative time after
+# that leg side by side ("Wolfgang Waldhäusl 71 11:40 11:40") - a second
+# trailing time column parse_flow_row() was never built to expect (its
+# original 'Hartberger Peter 13 13:28' shape - see this function's
+# docstring - has only the one). Left alone, the extra token doesn't get
+# peeled at all, so the own-leg-time stays stuck onto the name instead of
+# being recognized as the time. Only the OWN leg time (first of the two) is
+# kept - the cumulative running total isn't tracked anywhere in this schema.
+MEMBER_TWO_TIME_RE = re.compile(
+    r"^(?P<body>.+?\s\d{1,3}:\d{2}(?::\d{2})?)\s+\d{1,3}:\d{2}(?::\d{2})?$")
 
 
 def group_lines(words):
@@ -482,6 +521,8 @@ def parse_relay_pdf(path):
                       "note": " · ".join(note_bits), "status": status}
             if pending_team["rank"] is not None:
                 result["rank"] = pending_team["rank"]
+            if pending_team.get("championship"):
+                result["championship"] = pending_team["championship"]
             if seconds is not None:
                 result["timeS"] = seconds
             current["results"].append(result)
@@ -499,8 +540,21 @@ def parse_relay_pdf(path):
                         continue
                     m = CAT_LINE_RE.match(line)
                     if m and re.search(r"\(\d", line):
-                        flush()
                         name = m.group("name").strip()
+                        if current and current["name"] == name:
+                            # the category header repeats after a page break
+                            # ("(Forts.)") - a categoryless team/member row can
+                            # legitimately start with the same leading digit as
+                            # a fresh rank too, so this dedup must key on the
+                            # exact category name matching, not just skip any
+                            # repeat - continuing into the SAME dict rather than
+                            # starting a fresh one (confirmed real: event 3825,
+                            # "Mixed Staffel ab 50" splitting into two separate
+                            # category entries lost every mid-category team's
+                            # rank<=3 from national_rank's per-category count)
+                            flush()
+                            continue
+                        flush()
                         current = {"name": name, "declaredStarters": int(m.group("starters")),
                                    "results": []}
                         categories.append(current)
@@ -508,13 +562,25 @@ def parse_relay_pdf(path):
                     if current is None:
                         continue
 
+                    championship = None
+                    if line[0].isdigit():
+                        am = RELAY_TEAM_ANNOT_RE.match(line)
+                        if am:
+                            championship = classify_championship_text(am.group("title"))
+                            line = line[: am.start("rank")] + am.group("rank") + " " + line[am.end():]
+                    else:
+                        tm = MEMBER_TWO_TIME_RE.match(line)
+                        if tm:
+                            line = tm.group("body")
+
                     flow = parse_flow_row(line, {})
                     if not flow or not flow["names"] or not (flow["timeText"] or flow["statusText"]):
                         continue
                     time_text = flow["timeText"] or flow["statusText"] or ""
                     if line[0].isdigit():
                         flush()
-                        pending_team = {"name": flow["names"][0], "rank": flow["rank"], "members": []}
+                        pending_team = {"name": flow["names"][0], "rank": flow["rank"],
+                                         "championship": championship, "members": []}
                     elif pending_team is not None:
                         pending_team["members"].append({"name": flow["names"][0], "timeText": time_text})
             flush()

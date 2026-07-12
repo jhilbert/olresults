@@ -479,6 +479,7 @@ function viewClub(name, year, medalType) {
   const allPodiums = query(`
     SELECT r.rank, r.national_rank, r.category, r.category_full, r.result_kind, r.championship,
            e.id AS event_id, e.title AS event_title, e.sport_type, s.title AS stage_title,
+           s.id AS stage_id, s.number AS stage_number,
            COALESCE(s.date, e.date_from) AS date, p.id AS person_id, p.name AS person_name
     FROM result r
     JOIN stage s ON s.id = r.stage_id
@@ -545,6 +546,22 @@ function viewClub(name, year, medalType) {
       if (key !== prevKey) { place = i + 1; prevKey = key; }
       p.place = place;
       p.entries.sort((a, b) => a.national_rank - b.national_rank || b.date.localeCompare(a.date));
+      // A legacy multi-day event (e.g. "OL Südbgld.", 3 stages) never gets a
+      // real per-stage s.title of its own (only ANNE's own /stages API sets
+      // that) - without SOME per-entry label, 3 medals at the same event
+      // render as three identical "OL Südbgld. · Herren ab 50" lines with
+      // only the date telling them apart. Falls back to "Etappe N" (the
+      // same fallback the Wettkämpfe view uses) whenever this person's own
+      // entries reveal the event has more than one distinct stage.
+      const eventStages = new Map();
+      for (const e of p.entries) {
+        if (!eventStages.has(e.event_id)) eventStages.set(e.event_id, new Set());
+        eventStages.get(e.event_id).add(e.stage_id);
+      }
+      for (const e of p.entries) {
+        e.stage_label = e.stage_title
+          || (eventStages.get(e.event_id).size > 1 ? `Etappe ${e.stage_number}` : "");
+      }
     });
     const medalLabel = { 1: "Gold", 2: "Silber", 3: "Bronze" };
 
@@ -568,7 +585,7 @@ function viewClub(name, year, medalType) {
           <td colspan="7">
             <ul class="medal-events">${p.entries.map((e) => `
               <li><b>${medalLabel[e.national_rank]}</b>${e.championship ? ` <span class="badge">${e.championship}</span>` : ""} ·
-                <a href="#/event/${e.event_id}">${esc(e.event_title)}</a>${e.stage_title && e.stage_title !== e.event_title ? ` · <b>${esc(e.stage_title)}</b>` : ""} ·
+                <a href="#/event/${e.event_id}">${esc(e.event_title)}</a>${e.stage_label && e.stage_label !== e.event_title ? ` · <b>${esc(e.stage_label)}</b>` : ""} ·
                 <span class="dim">${esc(e.category_full || e.category)} · ${fmtDate(e.date)}</span></li>`).join("")}
             </ul>
           </td>

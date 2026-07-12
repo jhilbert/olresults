@@ -1,6 +1,7 @@
 """Shared parsing helpers for Stephan Krämer SportSoftware (OE/OE2003/OE12/
 OEScore) result exports, used by both the HTML and PDF adapters.
 """
+import html
 import json
 import re
 from functools import lru_cache
@@ -286,6 +287,12 @@ STAATSMEISTER_RE = re.compile(r"(?i)\bstaats?meister")
 # "Österr." (double r) and "Öster." (single r) both appear as abbreviations
 # for "österreichisch" in the wild, alongside the unabbreviated word.
 OM_RE = re.compile(r"(?i)\böster(?:r|reich\w*)?\.?\s*meister")
+# The already-abbreviated "ÖM"/"ÖSTM" forms - confirmed real: event 3825's
+# relay PDF prints its team-row champion announcement as the bare
+# abbreviation ("1 und ÖM Naturfreunde Wien 1 35:06"), never the spelled-out
+# "Meister" word STAATSMEISTER_RE/OM_RE were built for.
+OSTM_ABBR_RE = re.compile(r"(?i)\bö\(?st\)?m\b")
+OM_ABBR_RE = re.compile(r"(?i)(?<![a-zäöüß])öm(?![a-zäöüß])")
 # A genuine announcement carries no time value of its own - it just replaces
 # the winner's rank number, on its own line/cell. One PDF export (a 2013
 # relay event) instead embeds it mid-row alongside the team's real Stnr/name/
@@ -301,9 +308,9 @@ def classify_championship_text(text):
     else (regional/other title, or no title at all) -> None."""
     if not text:
         return None
-    if STAATSMEISTER_RE.search(text):
+    if STAATSMEISTER_RE.search(text) or OSTM_ABBR_RE.search(text):
         return "ÖSTM"
-    if OM_RE.search(text):
+    if OM_RE.search(text) or OM_ABBR_RE.search(text):
         return "ÖM"
     return None
 
@@ -373,6 +380,24 @@ def detect_list_type(file_name, doc_text, is_sole_attachment=False):
 
 FILENAME_DATE_RE = re.compile(r"erg(\d{2})(\d{2})(\d{2})(?!\d)", re.I)
 DOC_DATE_RE = re.compile(r"\b(\d{1,2})\.(\d{1,2})\.(20\d{2})\b")
+HTML_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
+
+
+def extract_html_title(html_text):
+    """SportSoftware's own <title> often names the exact championship a
+    legacy multi-race weekend's ONE stage covers ('... + ÖSTM/ÖM + 3.AC
+    Mittel + TM') even when the ANNE event's own title/slug is completely
+    generic ('AC Weekend Seefeld') - the event bundles an Austria-Cup
+    weekend with an embedded championship day, and only the per-file
+    SportSoftware title records which day that was. Confirmed real: event
+    3938 ("AC Weekend Seefeld"), Sunday stage title "... + ÖSM/ÖM SkiO
+    Middle + TM" - Wolfgang Waldhäusl's bronze there had no other way to
+    be recognized as a championship placing at all."""
+    m = HTML_TITLE_RE.search(html_text)
+    if not m:
+        return None
+    title = re.sub(r"\s+", " ", html.unescape(m.group(1))).strip()
+    return title or None
 
 
 def guess_doc_date(file_name, doc_text):

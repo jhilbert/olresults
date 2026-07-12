@@ -8,6 +8,7 @@ classified count, winner time) are computed in the category_stats view, never
 stored.
 """
 import gzip
+import hashlib
 import json
 import re
 import sqlite3
@@ -333,7 +334,19 @@ def is_ostm_eligible_category(category):
 # can tell from the title alone. Event 4783 ("ÖM Nacht und 1.AC (Sprint)")
 # was a two-day meet; only the non-championship 1.AC Sprint day produced any
 # results at all, the ÖM Nacht half never happened / was never published.
-TITLE_FALLBACK_EXCLUDE_EVENTS = {4783}
+#
+# Event 3999 ("Austrian Finals - AC - Sprint") is the KO-Sprint's own
+# QUALIFICATION round, not a championship result in its own right - its
+# slug ("...qualifikation-om-knock-out-sprint") only mentions ÖM because
+# it's naming the event it qualifies INTO, and the attached PDF's own
+# title confirms this plainly ("Qualifikation-Graz"). The real ÖM medals
+# for every one of these same age brackets already live at event 3998
+# ("Austrian Finals - ÖM-Knock-Out-Sprint") under its proper "X A-Finale"
+# categories (with "B-Finale"/qualifying heats correctly excluded there) -
+# 3999's plain, non-bracket "Damen ab 35" etc. rows are just the qualifying
+# heat times feeding into that final, confirmed real after the user flagged
+# this file directly ("is no ÖM!").
+TITLE_FALLBACK_EXCLUDE_EVENTS = {4783, 3999}
 
 # Same idea, but for a two-day meet where only ONE day is the actual
 # championship and the other genuinely has its own separate, unrelated
@@ -410,11 +423,13 @@ KNOWN_INELIGIBLE_RESULTS = {
 FOREIGN_CLUB_KEYWORDS = [
     "italy", "italia", "hungary", "hungarian", "ukraine", " usa", "bulgaria", "bulgarien",
     "czech", "schweiz", "croatia", "slovenia", "poland", "latvia", "philippines", "australia",
+    "madona",
     " (lit)", " (hu)", " (d)", " (lat)",
     "praha", "praga", "prg", "brno", "plzen", "plzeň", "jihlava", "hradec kralov", "hradec králov",
     "strelka",
     "pardubice", "jicín", "jičín", "liberec", "šumperk", "sumperk", "vsetín", "vsetin",
     "bratislava", "zlín", "zlin", "nový bor", "novy bor", "blansko", "sokolov", "chrastava",
+    "zilina",
     "dobríš", "dobris", "kamenice", "jilemnice", "smržovka", "smrzovka", "ceske budejovice",
     "ceské budejovice", "marianske lazne", "mariánské lázne", "rychnov", "kob ", "tj spartak",
     "tj tesla", "sk zabovresky", "sk zabrovesky", "sk zabrovresky", "skob", "vštj", "vstj",
@@ -516,7 +531,7 @@ def apply_championship_eligibility_overrides(cur):
     return n
 
 
-def apply_title_championship_fallback(cur):
+def apply_title_championship_fallback(cur, stage_doc_titles=None):
     """Only touches a (stage, category) with zero rows already carrying a
     championship tag (i.e. no per-row annotation was found anywhere in that
     category) - including relay categories, e.g. a PDF "Staffel" export
@@ -538,19 +553,30 @@ def apply_title_championship_fallback(cur):
     event 4315 "ÖM Nacht") - a pair category with no real per-row
     annotation of its own used to fall through this fallback entirely
     despite a clearly ÖM-titled event, because the original SELECT/UPDATE
-    only looked at 'individual'/'relay' and forgot 'pair' existed."""
+    only looked at 'individual'/'relay' and forgot 'pair' existed. Same
+    story for 'team' (e.g. event 3831, "ÖM Mannschaft", 2023) - a named-
+    individual team result (not the anonymous surname-only roster kind
+    load_legacy_results also tags 'team') that never got a championship
+    at all despite a clearly ÖM-titled event and real gold/silver/bronze
+    teams underneath, because 'team' wasn't in this list either.
+
+    stage_doc_titles (stage_id -> set of SportSoftware <title> strings,
+    from load_legacy_results) is consulted whenever the event's own
+    title/slug alone classifies to nothing - see extract_html_title's
+    docstring for why a legacy Austria-Cup weekend can need it."""
+    stage_doc_titles = stage_doc_titles or {}
     cur.execute("""
-        SELECT DISTINCT s.id, r.category, e.title, e.id, e.slug, r.result_kind FROM result r
+        SELECT DISTINCT s.id, r.category, e.title, e.id, e.slug, r.result_kind, e.sport_type FROM result r
         JOIN stage s ON s.id = r.stage_id
         JOIN event e ON e.id = s.event_id
-        WHERE r.status = 'ok' AND r.result_kind IN ('individual', 'relay', 'pair')
+        WHERE r.status = 'ok' AND r.result_kind IN ('individual', 'relay', 'pair', 'team')
           AND NOT EXISTS (SELECT 1 FROM result r2
                             WHERE r2.stage_id = s.id AND r2.category = r.category
                               AND r2.championship IS NOT NULL)
     """)
     candidates = cur.fetchall()
     n = 0
-    for sid, category, title, eid, slug, result_kind in candidates:
+    for sid, category, title, eid, slug, result_kind, sport_type in candidates:
         if eid in TITLE_FALLBACK_EXCLUDE_EVENTS or sid in TITLE_FALLBACK_EXCLUDE_STAGES:
             continue
         # ANNE sometimes only exposes a terse shortTitle ("5.AC") with the
@@ -558,9 +584,22 @@ def apply_title_championship_fallback(cur):
         # slug (confirmed real: event 4434, title "5.AC", slug "5-ac-om-
         # jugend-sprint-alpen-adria-cup").
         types = classify_title_championships(title, slug)
+        combined = f"{title} {slug or ''}"
+        if not types:
+            # only consult the per-file SportSoftware title as a fallback
+            # of last resort, and only fold it into `combined` (the JUGEND/
+            # SENIOR scoping checks below) in that same case - doing this
+            # unconditionally for every stage regressed ~2000 previously-
+            # correct rows, since many legacy titles mention words like
+            # "Jugend"/"Senioren" that would otherwise silently narrow an
+            # already-correctly-classified stage.
+            doc_title_text = " ".join(stage_doc_titles.get(sid, ()))
+            if doc_title_text:
+                types = classify_title_championships(doc_title_text)
+                if types:
+                    combined = f"{combined} {doc_title_text}"
         if not types:
             continue
-        combined = f"{title} {slug or ''}"
         if (JUGEND_ONLY_RE.search(combined) and "sen" not in combined.lower()
                 and AB_AGE_RE.search(category)):
             continue
@@ -597,6 +636,24 @@ def apply_title_championship_fallback(cur):
                                  or (eid in EVENT_ELITE_OM_OVERRIDE
                                      and is_ostm_eligible_category(category))):
             champ = "ÖM"
+        elif (sport_type == "mountainbikeOrienteering" and types == {"ÖSTM"}
+                and is_om_eligible_category(category)):
+            # MTBO's "ÖSTM"-only titles (no "ÖM" mentioned at all) still
+            # cover the non-Elite age brackets as ÖM, unlike foot-O where an
+            # ÖSTM-only title is genuinely Elite-only (confirmed explicitly
+            # for foot-O: event 3830 "ÖSTM Langdistanz", masters categories
+            # correctly get nothing). Confirmed for MTBO by cross-referencing
+            # sibling events with real per-row annotations under the exact
+            # same "MTBO ÖSTM Sprint/Mittel/Lang (+ N. AC)" title shape and
+            # no "ÖM" token anywhere (events 3820, 3821, 3955, 3957, 4835,
+            # 4956) - every one of them genuinely tags non-Elite categories
+            # ÖM via a real "und Österreichischer Meister" row annotation,
+            # so the same-shaped event 3962 ("MTBO ÖSTM Sprint und NÖ & St
+            # LM") missing that annotation in its own source file is a gap
+            # in that file's printing, not a real difference in the event -
+            # Barbara Kastner's "Damen ab 50" gold there was invisible to us
+            # entirely without this MTBO-specific inference.
+            champ = "ÖM"
         else:
             continue
         # rank IS NOT NULL: a relay/pair leg can be status='ok' (that runner
@@ -607,7 +664,7 @@ def apply_title_championship_fallback(cur):
         cur.execute("""UPDATE result SET championship = ?
                         WHERE stage_id = ? AND category = ? AND status = 'ok'
                           AND rank IS NOT NULL
-                          AND result_kind IN ('individual', 'relay', 'pair')""", (champ, sid, category))
+                          AND result_kind IN ('individual', 'relay', 'pair', 'team')""", (champ, sid, category))
         n += cur.rowcount
     return n
 
@@ -1165,11 +1222,89 @@ def correct_legacy_stage_dates(docs, events):
     return n
 
 
+def drop_cross_event_duplicate_docs(docs):
+    """Some events publish a byte-identical result file under a SECOND,
+    separate ANNE event id - confirmed real by hand with ANNE's own
+    support (event 4048, "OL Südbgld.", a whole-weekend listing bundling
+    all 3 days, vs. 4129/4130/4131, "ÖM Nacht"/"ÖM Lang"/"ÖM Sprint", one
+    dedicated event per day, each publishing the exact same file as the
+    corresponding day of 4048) - every result in a shared file was
+    counting as a medal twice, once under each event id. Detected by
+    hashing each doc's own parsed categories (not the raw file - two
+    independently-parsed copies of the identical source normalize to the
+    identical dict either way, and this avoids re-reading raw files
+    here). Confirmed real, not a coincidence: an accidental hash
+    collision between two genuinely different competitions would need
+    every runner's name, club, rank and time to match exactly.
+
+    Once duplicate content is confirmed, which copy to keep is decided by
+    which event covers the BROADEST span of it - most distinct dates
+    among its own docs, then most attachments, then (deterministic final
+    tiebreak, arbitrary otherwise) the lower event id - since the whole
+    point is that the loser's content is, by construction, a full subset
+    of the winner's, so nothing unique is ever actually lost. This
+    prefers the single multi-stage event (4048) over the 3 separate
+    single-stage ones - the reverse of preferring by title/slug ÖM/ÖSTM
+    marker, which would keep the 3 harder-to-find single-day events
+    instead: confirmed by hand that only 4048 shows up when browsing
+    ANNE's own site at all."""
+    groups = defaultdict(list)
+    for d in docs:
+        h = hashlib.md5(json.dumps(d.get("categories"), sort_keys=True, default=str)
+                         .encode()).hexdigest()
+        groups[h].append(d)
+    by_event = defaultdict(list)
+    for d in docs:
+        by_event[d["eventId"]].append(d)
+
+    def completeness(eid):
+        ds = by_event[eid]
+        return (len({d.get("docDate") for d in ds if d.get("docDate")}), len(ds))
+
+    drop = set()
+    for group in groups.values():
+        eids = set(d["eventId"] for d in group)
+        if len(eids) < 2:
+            continue
+        keep_eid = max(eids, key=lambda eid: (completeness(eid), -eid))
+        for d in group:
+            if d["eventId"] != keep_eid:
+                drop.add(id(d))
+    if not drop:
+        return docs, 0
+    kept = [d for d in docs if id(d) not in drop]
+    return kept, len(docs) - len(kept)
+
+
+# SportSoftware's own generated <title> is consistently "{event name} -
+# Ergebnis - {race/stage name}" ("OL Weekend Südburgenland - Ergebnis - ÖM
+# Nacht & 2. AC") - the part after "Ergebnis" is exactly the per-day race
+# name ANNE's own /stages API would have given a non-legacy multi-day event,
+# and legacy stages never get one otherwise (dated_stage()/default_stage()
+# always insert title=NULL) - confirmed real: event 4048 ("OL Südbgld."),
+# whose 3 days are "ÖM Nacht"/"ÖM Lang"/"ÖM Sprint" and were otherwise
+# indistinguishable in the UI beyond a generic "Etappe 1/2/3" fallback.
+STAGE_TITLE_SUFFIX_RE = re.compile(r"\s-\s*Ergebnis\s*-\s(.+)$", re.I)
+
+
+def derive_stage_title(doc_title):
+    m = STAGE_TITLE_SUFFIX_RE.search(doc_title or "")
+    return m.group(1).strip() if m else None
+
+
 def load_legacy_results(cur, events, persons, stage_ids, anne_event_ids):
     n = 0
+    # SportSoftware's own per-file <title> ("... + ÖSTM/ÖM + 3.AC Mittel +
+    # TM") sometimes names a championship the ANNE event's own title/slug
+    # never does, when a legacy Austria-Cup weekend bundles one champion-
+    # ship day under an otherwise generic event id (e.g. event 3938, "AC
+    # Weekend Seefeld") - collected per stage here and consulted by
+    # apply_title_championship_fallback alongside the event-level title.
+    stage_doc_titles = defaultdict(set)
     canonical = re.compile(r"^\d+-(?:club)?\d+\.json$")
     docs = [json.loads(p.read_text())
             for p in sorted(NORM.glob("*.json")) if canonical.match(p.name)]
+    docs, _n_dropped = drop_cross_event_duplicate_docs(docs)
     correct_legacy_stage_dates(docs, events)
     # plain result lists before split-time lists, so duplicates resolve
     # in favour of the cleaner source. Also prefer a dedicated relay
@@ -1231,6 +1366,8 @@ def load_legacy_results(cur, events, persons, stage_ids, anne_event_ids):
                                event_dates.index(doc["docDate"]) + 1)
         else:
             sid = default_stage(cur, event, stage_ids)
+        if doc.get("docTitle"):
+            stage_doc_titles[sid].add(doc["docTitle"])
         flip_doc = detect_lastname_firstname_doc(doc["categories"], persons.first_names)
         for cat in doc["categories"]:
             for r in cat["results"]:
@@ -1275,7 +1412,15 @@ def load_legacy_results(cur, events, persons, stage_ids, anne_event_ids):
                               result_kind=kind, note=note, source=doc["source"],
                               championship=r.get("championship"))
                 n += 1
-    return n
+
+    for sid, titles in stage_doc_titles.items():
+        for t in titles:
+            label = derive_stage_title(t)
+            if label:
+                cur.execute("UPDATE stage SET title = ? WHERE id = ? AND title IS NULL", (label, sid))
+                break
+
+    return n, stage_doc_titles
 
 
 def main():
@@ -1316,7 +1461,7 @@ def main():
                       if has_usable_names(p)}
     n_api = load_anne_results(cur, events, persons, stage_ids)
     persons.finalize_first_names()
-    n_legacy = load_legacy_results(cur, events, persons, stage_ids, anne_event_ids)
+    n_legacy, stage_doc_titles = load_legacy_results(cur, events, persons, stage_ids, anne_event_ids)
 
     # Some API results have no userId (old events) or field-order quirks;
     # they're matched via from_legacy and can mint a synthetic identity
@@ -1453,7 +1598,7 @@ def main():
 
     cur.execute("DROP TABLE champion_rank")
 
-    n_title_fallback = apply_title_championship_fallback(cur)
+    n_title_fallback = apply_title_championship_fallback(cur, stage_doc_titles)
 
     strip_age_overlap_categories(cur)
 
