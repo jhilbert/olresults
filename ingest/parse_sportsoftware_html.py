@@ -503,6 +503,7 @@ def main():
             list_type = detect_list_type(f["fileName"], text, sole_attachment)
             if list_type == "overall":
                 empty += 1  # split-times / cumulative-standings report: redundant, skip
+                out_path.unlink(missing_ok=True)  # stale output from an earlier, buggier run
                 continue
             if list_type == "relay":
                 cats = parse_relay_document(text)
@@ -521,6 +522,7 @@ def main():
                 cats = [c for c in cats if c["name"] not in skip_cats]
             if not cats:
                 empty += 1
+                out_path.unlink(missing_ok=True)  # stale output from an earlier, buggier run
                 continue
             out_path.write_text(json.dumps({
                 "eventId": eid,

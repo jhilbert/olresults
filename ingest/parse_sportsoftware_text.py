@@ -245,6 +245,7 @@ def main():
             cats = parse_text(text)
             if not cats:
                 empty += 1
+                out_path.unlink(missing_ok=True)  # stale output from an earlier, buggier run
                 continue
             out_path.write_text(json.dumps({
                 "eventId": eid,

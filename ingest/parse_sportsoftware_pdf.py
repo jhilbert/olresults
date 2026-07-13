@@ -701,7 +701,25 @@ def main():
         try:
             fetch(f["url"], pdf_path)
             cats, head_text = parse_pdf(pdf_path, allow_inline_splits=sole_attachment)
-            if RELAY_HEADER_RE.search(head_text):
+            if SPLITS_RE.search(head_text) and not sole_attachment:
+                # A genuine Zwischenzeiten/split-times report only duplicates
+                # the real results file that exists elsewhere for this same
+                # event - parse_pdf() already refuses it (returning empty
+                # cats) via its own has_inline_splits check, but that check
+                # only guards ITS OWN table-column parsing; every fallback
+                # path below (relay, wintertour, flowing) had no such guard
+                # at all and would happily misparse the same per-control
+                # cumulative-time rows as if they were real placements.
+                # Confirmed real: event 3824's "...-rel-result-splits.pdf" -
+                # parse_flowing_pdf() read a split line ("1 HSV OL Wiener
+                # Neustadt 1 2:59 4:56 ...", where "1" is the control number
+                # and "2:59" a cumulative split, not a placement or a finish
+                # time) as a real team result, inventing a phantom rank-1
+                # "Herren 150" team years before anyone noticed - nothing
+                # else ever surfaced that category's actual winner for
+                # comparison until the Wettkämpfe view's "Meister" toggle did.
+                cats = []
+            elif RELAY_HEADER_RE.search(head_text):
                 # parse_pdf()'s flat Pl/Stnr/Name/Verein/Zeit column model
                 # doesn't understand the two-tier team+member relay layout -
                 # confirmed by hand (event 4829) that it doesn't just come up
@@ -720,6 +738,13 @@ def main():
                     cats = parse_flowing_pdf(pdf_path)
             if not cats:
                 empty += 1
+                # a file that used to parse (under an earlier, buggier
+                # version of this script) but correctly comes up empty now
+                # must not leave its stale, wrong JSON sitting on disk
+                # forever - load_legacy_results() would otherwise go on
+                # using it indefinitely, since nothing else ever prunes
+                # data/normalized/ on its own.
+                out_path.unlink(missing_ok=True)
                 continue
             out_path.write_text(json.dumps({
                 "eventId": eid,

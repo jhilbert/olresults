@@ -367,7 +367,19 @@ def detect_list_type(file_name, doc_text, is_sole_attachment=False):
     no other source to fall back on, so treat it as this race's own results
     rather than silently discarding the entire event."""
     head = doc_text[:4000]
-    if re.search(r"zwischenzeit", file_name, re.I) or re.match(r"\s*\S*\s*Zwischenzeiten", head):
+    # "split" (English) is as common a filename marker for a split-times
+    # report as the German "zwischenzeit" - confirmed real: event 4515's
+    # "split-teame-slit.html" (a typo'd "team-split") was never recognized,
+    # so it got parsed as a second, real 'race' file instead of skipped as
+    # redundant - a split-times report's own per-control layout garbles
+    # names badly enough to invent phantom extra "teams" out of name
+    # fragments ("Berger H", "Berger Adenstedt" alongside the real "Ingrid
+    # Adenstedt"/"Gislind Berger"/"Hedi Berger"), corrupting the medal
+    # count for that category. Checked ahead of the "staffel|relay" filename
+    # check below, since a split-times file can ALSO have "staffel" in its
+    # name (event 3824's "...-relind-result-splits.pdf") and must still be
+    # recognized as redundant, not misrouted to the relay parser instead.
+    if re.search(r"zwischenzeit|split", file_name, re.I) or re.match(r"\s*\S*\s*Zwischenzeiten", head):
         return "overall"                       # split-times report, redundant
     if re.search(r"einzel", file_name, re.I):
         return "race"                          # individual results within a Staffel event
