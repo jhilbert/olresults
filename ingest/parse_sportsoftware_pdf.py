@@ -131,13 +131,20 @@ RANK_PREFIX_RE = re.compile(r"^\d+\.?$")
 # "Staffel" word anywhere - event 3824, "Chicken Challenge ÖM/ÖStM
 # Staffel"). What's constant across every one of these two-tier team+member
 # layouts, and never appears in a flat individual-row export, is the SECOND
-# header line right below it: "Name Jg Zeit" (the member sub-table's own
-# columns) - matching on that instead of trying to enumerate every team-row
-# column-name spelling. Each earlier narrower version of this regex missed
-# a real relay and silently mangled it into single bogus rows per category
-# ("AK"/"OLC Wienerwald" as if it were one runner) via the flat individual
-# parser instead.
-RELAY_HEADER_RE = re.compile(r"^Pl\b.*\n\s*Name\s+Jg\s+Zeit\b", re.M)
+# header line right below it - "[X] Name [Y] Zeit", where X/Y are whatever
+# per-member stat that export includes: birth year "Jg" (after Name), leg
+# number "Lnr" (confirmed real: event 3633, "ÖSTM und ÖM Staffel" 2022 -
+# "Lnr Name Zeit", the ONE variant with its extra column BEFORE "Name"
+# rather than after, which an earlier version of this regex - requiring
+# "Name" to lead the line - missed entirely, dropping whole teams including
+# Naturfreunde Wien's H-14 bronze relay out of the results), or nothing at
+# all, just "Name Zeit". Matching on "Name" appearing somewhere on this
+# second line with "Zeit" after it, an optional single token on either
+# side, instead of enumerating every column-name spelling. Each earlier
+# narrower version of this regex missed a real relay and silently mangled
+# it into single bogus rows per category ("AK"/"OLC Wienerwald" as if it
+# were one runner) via the flat individual parser instead.
+RELAY_HEADER_RE = re.compile(r"^Pl\b.*\n\s*(?:\S+\s+)?Name\s+(?:\S+\s+)?Zeit\b", re.M)
 
 # A relay team row can carry its champion announcement inline, ahead of the
 # real team name/time ("1 und ÖM Naturfreunde Wien 1 35:06") - unlike a
@@ -161,6 +168,19 @@ RELAY_TEAM_ANNOT_RE = re.compile(
 # kept - the cumulative running total isn't tracked anywhere in this schema.
 MEMBER_TWO_TIME_RE = re.compile(
     r"^(?P<body>.+?\s\d{1,3}:\d{2}(?::\d{2})?)\s+\d{1,3}:\d{2}(?::\d{2})?$")
+
+# A "Pl Staffel Zeit Diff." header (see RELAY_HEADER_RE) prints the team's
+# gap behind the leader right after its own finish time ("3 Naturfreunde
+# Wien 1 1:45:25 +19:13" - the leader's own row instead gets a bare "0:00").
+# parse_flow_row()'s TIME_RE requires an exact "H:MM:SS" match with no sign,
+# so the leading "+" on every non-leader row's Diff value makes the WHOLE
+# trailing token fail to parse as a time OR a status - with nothing left
+# recognizable as this row's result, the row silently vanishes rather than
+# just losing the diff value. Confirmed real: event 3633 ("ÖSTM und ÖM
+# Staffel" 2022) dropped every team but the category leader entirely,
+# Naturfreunde Wien's real H-14 bronze relay among them.
+TEAM_DIFF_SUFFIX_RE = re.compile(
+    r"^(?P<body>.+?\s\d{1,3}:\d{2}(?::\d{2})?)\s+\+?\d{1,3}:\d{2}(?::\d{2})?$")
 
 
 def group_lines(words):
@@ -193,6 +213,8 @@ def parse_pdf(path, allow_inline_splits=False):
     categories = []
     current = None
     headers = None
+    team_row_mode = False
+    team_member_labels = []
     head_text = ""
     pending_rank = pending_championship = None  # from a champion-announcement
                      # line ("1. und Staatmeister 2020"), which forms its own
@@ -218,6 +240,31 @@ def parse_pdf(path, allow_inline_splits=False):
 
                     if line[0]["text"] in ("Pl", "Platz") and len(line) >= 3:
                         headers = [(w["text"], w["x0"]) for w in line]
+                        # A team-standings layout ("Pl Verein Zeit Text1 Text2
+                        # Text3") has no "Name" column at all - the team's own
+                        # name lives in "Verein" and each member gets their own
+                        # "TextN" column instead. Recognized by that absence
+                        # (plus no "Staffel" either, since "Text1" ALSO gets
+                        # reused for the unrelated narrow champion-announcement
+                        # column on an otherwise-"Staffel"-headed relay layout -
+                        # see LEAKED_TITLE_WORD_RE below) - without this, every
+                        # row's `name` comes from the missing "Name" column
+                        # (always empty), so is_junk_name() drops the ENTIRE
+                        # file silently and it falls through to the flowing-
+                        # text fallback, which discards the member names
+                        # entirely and misreads the tail of a long club name
+                        # as its own separate "club" (confirmed real: event
+                        # 3507, "ÖM Mannschaft" 2022 - "HSV OL Wiener
+                        # Neustadt" split into name="HSV OL Wiener"/
+                        # club="Neustad(t)", with all 3 real team members'
+                        # names lost outright).
+                        header_labels = {h[0] for h in headers}
+                        team_member_labels = sorted(
+                            (h[0] for h in headers if re.fullmatch(r"Text\d+", h[0])),
+                            key=lambda s: int(s[4:]))
+                        team_row_mode = bool(
+                            team_member_labels and "Verein" in header_labels
+                            and not header_labels & {"Name", "Staffel"})
                         if current is None:
                             # some fun-run/app-based races have no age/gender
                             # classes at all: one flat ranking, no "(N)"
@@ -250,6 +297,37 @@ def parse_pdf(path, allow_inline_splits=False):
                     annot_rank, annot_championship = parse_champion_annotation(text)
                     if annot_rank is not None:
                         pending_rank, pending_championship = annot_rank, annot_championship
+                        continue
+
+                    if team_row_mode:
+                        rec = assign_columns(line, headers)
+                        club = (rec.get("Verein") or "").strip()
+                        rank_text = (rec.get("Pl") or "").strip()
+                        time_text = (rec.get("Zeit") or "").strip()
+                        members = [rec.get(lbl, "").strip() for lbl in team_member_labels]
+                        members = [m for m in members if m and not is_junk_name(m)]
+                        if not club and not members:
+                            continue
+                        rank = None
+                        if rank_text.isdigit():
+                            rank = int(rank_text)
+                        elif pending_rank is not None:
+                            rank = pending_rank
+                        seconds = parse_time_loose(time_text)
+                        status = "ok" if seconds is not None else (parse_status(time_text) or "unknown")
+                        for i, nm in enumerate(members):
+                            mates = [m for j, m in enumerate(members) if j != i]
+                            note = "Mannschaft: " + club + (" · mit " + ", ".join(mates) if mates else "")
+                            res = {"name": nm, "club": club, "timeText": time_text,
+                                   "resultKind": "team", "note": note, "status": status}
+                            if rank is not None:
+                                res["rank"] = rank
+                            if pending_championship:
+                                res["championship"] = pending_championship
+                            if seconds is not None:
+                                res["timeS"] = seconds
+                            current["results"].append(res)
+                        pending_rank = pending_championship = None
                         continue
 
                     # Prefer a text parse anchored on the known-club dictionary:
@@ -563,12 +641,101 @@ def parse_relay_pdf(path):
                         continue
 
                     championship = None
+                    is_leg_member = False
                     if line[0].isdigit():
-                        am = RELAY_TEAM_ANNOT_RE.match(line)
-                        if am:
-                            championship = classify_championship_text(am.group("title"))
-                            line = line[: am.start("rank")] + am.group("rank") + " " + line[am.end():]
+                        # Ambiguous with a brand-new team's own rank digit -
+                        # for the "Lnr Name Zeit" member sub-header shape
+                        # (see RELAY_HEADER_RE), each member row ALSO leads
+                        # with its own small digit (leg number), not a blank
+                        # cell like the layout this function was originally
+                        # built for. Told apart by shape, not by whether it's
+                        # a team row we're expecting more members from: after
+                        # the leading digit, a genuine member row is always
+                        # "Firstname Lastname time/status" (exactly 2 name
+                        # tokens, and they read as a real person) - a team
+                        # row's own name usually has 3+ tokens (SportSoftware
+                        # always appends its own trailing squad-instance
+                        # number, "Naturfreunde Wien 1"), but a few clubs
+                        # (confirmed real: "WAT-OL") collapse to a single
+                        # token, landing at the same 2-token count as a
+                        # member row purely by coincidence - looks_like_
+                        # person() is the tiebreaker there ("WAT-OL 1" isn't
+                        # a person; "Linus Dobler" is). Capped at 4 already-
+                        # collected members as a last-resort backstop (no
+                        # relay leg in this dataset runs longer). Confirmed
+                        # real: event 3633 ("ÖSTM und ÖM Staffel" 2022) -
+                        # every member row's own leg-number was being read as
+                        # a brand-new team, flushing the real team empty and
+                        # fabricating a bogus one out of a single runner's
+                        # name, losing entire teams (Naturfreunde Wien's
+                        # H-14 bronze relay among them) outright.
+                        toks = line.split()
+                        if (pending_team is not None and len(pending_team["members"]) < 4
+                                and len(toks) >= 2):
+                            tail = toks[1:]
+                            time_idx = next((i for i, t in enumerate(tail)
+                                              if FLOW_TIME_RE.match(t.lstrip("+"))
+                                              or parse_status(t)), None)
+                            if time_idx == 2 and looks_like_person(" ".join(tail[:2])):
+                                is_leg_member = True
+                        if not is_leg_member:
+                            am = RELAY_TEAM_ANNOT_RE.match(line)
+                            if am:
+                                championship = classify_championship_text(am.group("title"))
+                                line = line[: am.start("rank")] + am.group("rank") + " " + line[am.end():]
+                            dm = TEAM_DIFF_SUFFIX_RE.match(line)
+                            if dm:
+                                line = dm.group("body")
                     else:
+                        # An "AK" (außer Konkurrenz / out-of-competition) team
+                        # is printed with the literal text "AK" standing in
+                        # for its missing rank number - otherwise a normal
+                        # team row (name + time + diff), e.g. "AK OLC
+                        # Wienerwald 1 2:08:46 +23:47". Without this check it
+                        # fell through to the member-row path below and was
+                        # swallowed as a phantom extra member of whatever
+                        # team preceded it (pushing that team over the 4-
+                        # member cap); its OWN following member rows then had
+                        # no team to attach to and got misread as fabricated
+                        # single-person "teams" instead (confirmed real:
+                        # event 3633's phantom "Klaus Kramer"/"Guni Palme" and
+                        # "Tim Lechner"/"Martin Bogensperger" entries),
+                        # knocking the real next team's national_rank off by
+                        # one.
+                        ak_m = re.match(r"^AK\s+(.+)$", line)
+                        if ak_m:
+                            rest = ak_m.group(1)
+                            dm = TEAM_DIFF_SUFFIX_RE.match(rest)
+                            if dm:
+                                rest = dm.group("body")
+                            ak_flow = parse_flow_row(rest, {})
+                            if ak_flow and ak_flow["names"]:
+                                flush()
+                                pending_team = {"name": ak_flow["names"][0], "rank": None,
+                                                 "championship": None, "members": []}
+                                continue
+                        # A DNF/non-finishing team is printed with NO leading
+                        # rank at all - just its name directly followed by a
+                        # status word ("SU Schöckl Orienteering SUSO-14-1
+                        # Fehlst", "OC Fürstenfeld OCFF2 Aufg") - so it looks
+                        # exactly like a rankless "blank first cell" MEMBER
+                        # row at a glance, but a real member row's own status
+                        # only ever follows a clean two-token person name,
+                        # never a team-shaped one. Checked ahead of that
+                        # member-row path so it isn't swallowed as a phantom
+                        # extra member of whatever team precedes it - which
+                        # then knocks its OWN first real member (misread as a
+                        # brand-new team next) out of alignment too. Confirmed
+                        # real: event 3633, where this exact cascade invented
+                        # a phantom "Moritz Mosing" team ahead of Naturfreunde
+                        # Wien's real bronze-medal relay, corrupting its
+                        # national_rank by one full place.
+                        sm = STATUS_TAIL_RE.search(line)
+                        if sm and not looks_like_person(line[: sm.start()].strip()):
+                            flush()
+                            pending_team = {"name": line[: sm.start()].strip(), "rank": None,
+                                             "championship": None, "members": []}
+                            continue
                         tm = MEMBER_TWO_TIME_RE.match(line)
                         if tm:
                             line = tm.group("body")
@@ -577,7 +744,7 @@ def parse_relay_pdf(path):
                     if not flow or not flow["names"] or not (flow["timeText"] or flow["statusText"]):
                         continue
                     time_text = flow["timeText"] or flow["statusText"] or ""
-                    if line[0].isdigit():
+                    if line[0].isdigit() and not is_leg_member:
                         flush()
                         pending_team = {"name": flow["names"][0], "rank": flow["rank"],
                                          "championship": championship, "members": []}

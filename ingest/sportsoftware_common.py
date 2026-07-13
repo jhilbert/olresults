@@ -550,6 +550,20 @@ def expand_pair_result(result, category=None):
         names = split_pair_names(name)
     elif category and PAIR_CATEGORY_RE.search(category):
         names = split_hyphenated_pair_names(name)
+        if len(names) < 2:
+            # No delimiter at all between the two runners, not even a
+            # hyphen - just 4 bare space-separated tokens, "Lastname1
+            # Firstname1 Lastname2 Firstname2" (confirmed real: event 3851,
+            # "ÖM Nacht" 2022 - "Skern Anna Urbanek Annina" for the actual
+            # ÖM-champion pair, Anna Skern/Annina Urbanek). Splitting evenly
+            # down the middle is safe even though it's a guess: the
+            # all(...) validation right below rejects the split back to a
+            # single unchanged result unless BOTH halves independently look
+            # like a real two-token person name, so a genuine single (non-
+            # pair) 4-token name in this category is never wrongly split.
+            toks = name.split()
+            if len(toks) == 4:
+                names = [f"{toks[0]} {toks[1]}", f"{toks[2]} {toks[3]}"]
     else:
         return [result]
     if len(names) < 2 or not all(

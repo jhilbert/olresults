@@ -420,6 +420,25 @@ KNOWN_INELIGIBLE_RESULTS = {
     (4315, "Yelyzaveta Yevtushenko"),
 }
 
+# Single-row spelling typos confirmed present in the SOURCE document itself
+# (not a parsing artifact - the raw PDF/HTML text literally has the wrong
+# spelling), keyed the same way as KNOWN_INELIGIBLE_RESULTS. Left uncorrected,
+# the misspelled row resolves to its own synthetic person instead of the
+# runner's real identity, splitting one person's medal count across two
+# person records. Confirmed real: event 3633 ("ÖSTM und ÖM Staffel" 2022),
+# "Damen ab 19" relay leg 2 prints "Anita Gassner" where every other 2022
+# result (including the very next day's) spells the same Naturfreunde Wien
+# runner "Anika Gassner" - verified against the club's own Excel medal sheet.
+KNOWN_NAME_TYPOS = {
+    (3633, "Anita Gassner"): "Anika Gassner",
+    # Naturfreunde Wien's own Excel medal sheet and her ANNE-resolved
+    # identity both spell her "Matilda" (no h); these two source documents
+    # spell her "Mathilda" instead, fragmenting her medal count onto a
+    # separate synthetic person.
+    (3851, "Buschek Mathilda"): "Buschek Matilda",
+    (4690, "Mathilda Buschek"): "Matilda Buschek",
+}
+
 # Unambiguous non-Austrian club-name keywords (case-insensitive substring
 # match against the raw `club` field), derived by systematically reviewing
 # every club that appears in a current championship-tier row and fails to
@@ -438,7 +457,8 @@ KNOWN_INELIGIBLE_RESULTS = {
 # sounding name (OLT Transdanubien/HU - see USER_ELIGIBILITY_PATH).
 FOREIGN_CLUB_KEYWORDS = [
     "italy", "italia", "hungary", "hungarian", "ukraine", " usa", "bulgaria", "bulgarien",
-    "czech", "schweiz", "croatia", "slovenia", "poland", "latvia", "philippines", "australia",
+    "czech", "schweiz", "croatia", "slovenia", ", slo", "slovakia", "poland", "latvia",
+    "philippines", "australia",
     "madona",
     " (lit)", " (hu)", " (d)", " (lat)",
     "praha", "praga", "prg", "brno", "plzen", "plzeň", "jihlava", "hradec kralov", "hradec králov",
@@ -1535,6 +1555,18 @@ def load_legacy_results(cur, events, persons, stage_ids, anne_event_ids):
         # as one team-level row each; they're shown on event pages and excluded
         # from the runner directory.
         is_team = event.get("competitionType") == "team"
+        # A file whose own name says "team" (English, distinct from the
+        # ubiquitous German "Mannschaft" that both a team-standings AND an
+        # individual-runners file for the same event carry) holds ONLY team
+        # rows - every row in it is a team, never mixed with individual leg
+        # times, so the surname-count heuristic below (>= 3 tokens) doesn't
+        # need to guess for it. That heuristic alone missed real 2-word team
+        # names (confirmed real: event 3507, "ergebnis-teams-mannschaft.pdf" -
+        # "ASKÖ Henndorf"/"OLC Graz"-shaped team names have only 2 tokens,
+        # indistinguishable by word count from an ordinary "Firstname
+        # Lastname" individual, so they fell through to result_kind=
+        # 'individual' with the team name misread as a person).
+        doc_is_team_only = is_team and "team" in (doc.get("fileName") or "").lower()
         event_dates = sorted(dates_by_event.get(eid) or [])
         if doc.get("_anneStage"):
             sid = anne_mapped_stage(cur, event, stage_ids, doc["_anneStage"])
@@ -1554,6 +1586,7 @@ def load_legacy_results(cur, events, persons, stage_ids, anne_event_ids):
                 # emits one entry per runner already, each with its own name
                 # and a note; treat them uniformly here
                 name = clean_name(r["name"])
+                name = KNOWN_NAME_TYPOS.get((eid, name), name)
                 if not is_valid_name(name):
                     continue
                 if flip_doc:
@@ -1572,7 +1605,7 @@ def load_legacy_results(cur, events, persons, stage_ids, anne_event_ids):
                 parser_kind = r.get("resultKind")
                 if parser_kind:
                     kind, note = parser_kind, r.get("note")
-                elif is_team and len(name.split()) >= 3:
+                elif doc_is_team_only or (is_team and len(name.split()) >= 3):
                     kind, note = "team", "Mannschaft"
                 else:
                     kind, note = "individual", r.get("note")
