@@ -496,6 +496,24 @@ FOREIGN_CLUB_KEYWORDS = [
     "perkunas",
 ]
 
+# ÖM/ÖSTM medals require club membership, independent of nationality - a
+# "vereinslos" (clubless) starter can compete and occupy a real finish
+# position, but is never eligible for the title itself and doesn't block a
+# club-affiliated runner from theirs. Confirmed by hand: Oleksandr
+# Ievstafiev (UKR), vereinslos for the entire 10+ years he's raced in
+# Austria - his ANNE-confirmed championshipEligibility override reflects
+# his individual eligibility (citizenship/residency), a separate axis from
+# this club-membership requirement, so it does NOT make him medal-eligible
+# on its own. Matched by regex rather than an exact-string set since the
+# same "no club" status is spelled a dozen ways across sources
+# ("vereinslos", "Vereinlos", "kein Verein", "ohne Verein", "No Club",
+# "Individuals/No club", ...), several with a stray name or number stuck to
+# it from a parsing quirk elsewhere - the substring match still catches
+# those correctly since the clubless marker itself stays intact.
+CLUBLESS_CLUB_RE = re.compile(
+    r"vereins?los|verienslos|kein\s*verein|ohne\s*verein|no\s*club|"
+    r"club[- ]?less|individuals?\s*/\s*no\s*club", re.I)
+
 # ANNE's own championshipEligibility flag (see ingest/anne_user_eligibility.py),
 # cached per (ANNE userId, event id) - the authoritative signal, since
 # person.nationality alone isn't one: several long-tenured Austrian club
@@ -1877,6 +1895,18 @@ def main():
     for eid, pid, club in cur.fetchall():
         lc = club.lower()
         if any(k in lc for k in FOREIGN_CLUB_KEYWORDS):
+            cur.execute("INSERT INTO ineligible_starter (event_id, person_id) VALUES (?, ?)",
+                        (eid, pid))
+
+    # "vereinslos" (clubless) starters, regardless of nationality - see
+    # CLUBLESS_CLUB_RE's own docstring.
+    cur.execute("""
+        SELECT DISTINCT s.event_id, r.person_id, r.club FROM result r
+        JOIN stage s ON s.id = r.stage_id
+        WHERE r.club IS NOT NULL AND r.club != ''
+    """)
+    for eid, pid, club in cur.fetchall():
+        if CLUBLESS_CLUB_RE.search(club):
             cur.execute("INSERT INTO ineligible_starter (event_id, person_id) VALUES (?, ?)",
                         (eid, pid))
 
