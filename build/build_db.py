@@ -1058,15 +1058,30 @@ def is_bewertung_clone(event):
     return "bewertung" in (event.get("shortTitle") or "").lower()
 
 
-# ANNE's own sportType metadata is occasionally wrong at the source -
-# confirmed real: event 4317's shortTitle is literally "ÖM und ÖSTM Sprint
-# Mixed Staffel in SkiO", but ANNE reports sportType 'footOrienteering'.
-# This matters beyond mislabeling: the December-belongs-to-next-season
-# rule (site/app.js seasonYear()) only shifts a December date forward for
-# sportType 'skiOrienteering', so a Ski-O event misfiled as footO here
-# would silently stay attributed to the wrong (calendar, not season) year
-# everywhere on the site.
-EVENT_SPORT_TYPE_OVERRIDES = {4317: "skiOrienteering"}
+# ANNE's own sportType metadata is occasionally wrong - or, for a handful of
+# older/thinly-tracked events, simply absent (None) - at the source.
+# Confirmed real: event 4317's shortTitle is literally "ÖM und ÖSTM Sprint
+# Mixed Staffel in SkiO", but ANNE reports sportType 'footOrienteering'; events
+# 4626/4114/2605/2436/2437 (all "O-Festival" editions, ordinary summer foot-O)
+# and 3376 ("MTB-O Festival", named as such) carry sportType None outright.
+# This matters beyond mislabeling: (1) the Nov/Dec-belongs-to-next-season
+# "Wertungsjahr" rule (site/app.js seasonYear()) only shifts a date forward
+# for sportType 'skiOrienteering', so a Ski-O event misfiled as footO would
+# silently stay attributed to the wrong (calendar, not season) year
+# everywhere on the site; (2) the site's OL/SkiO/MTBO discipline filter can
+# only filter on sportType at all - a None value always passes every filter
+# state, so a genuinely MTBO event stuck at None never disappears when a
+# user filters it OUT, looking like a misclassification even though it's
+# really just missing data.
+EVENT_SPORT_TYPE_OVERRIDES = {
+    4317: "skiOrienteering",
+    4626: "footOrienteering",   # O-Festival 2025
+    4114: "footOrienteering",   # O-Festival 2023
+    2605: "footOrienteering",   # O-Festival 2019 E03
+    2437: "footOrienteering",   # O-Festival 2019 Etappe 02
+    2436: "footOrienteering",   # O-Festival 2019 Etappe 01
+    3376: "mountainbikeOrienteering",  # 38. MTB-O Festival
+}
 
 
 def load_events(cur):
@@ -1292,6 +1307,17 @@ LEGACY_FILENAME_DATE_RE = re.compile(r"(\d{1,2})[.-](\d{1,2})[.-](\d{4})")
 # which uses this to give each file its true stage identity (date AND title)
 # from ANNE even when two races share a day, which a date-only split can't.
 ETAPPE_FILENAME_RE = re.compile(r"(?<![a-z])e[\s.-]*(\d{1,2})(?![0-9])", re.I)
+# Split (Zwischenzeiten) files and cumulative "standings so far" files are
+# never a race's own result list - a split file has no rank/club/team of its
+# own (see the relay/leg-times dedup-priority comment above), and a
+# "results-after-eNN"/"over-all-results-after-eNN" file just re-totals every
+# earlier stage into one running score. Both need dropping before
+# map_docs_to_anne_stages ever sees them: ETAPPE_FILENAME_RE happily matches
+# the "eNN" inside "...-after-e02.pdf" too, so left in, a cumulative file
+# would collide with that same stage's own real result file and merge into
+# it. Confirmed real: event 4626 ("O-Festival 2025") - "over-all-results-
+# after-e02.pdf" mapping onto Etappe 2 alongside the real "results-e02.pdf".
+JUNK_DOC_FILENAME_RE = re.compile(r"-split\.|results-after-e\d+", re.I)
 
 
 def map_docs_to_anne_stages(docs):
@@ -1319,13 +1345,31 @@ def map_docs_to_anne_stages(docs):
         by_event[d["eventId"]].append(d)
     for eid, event_docs in by_event.items():
         stages_path = RAW / "stages" / f"{eid}.json"
-        if not stages_path.exists():
-            continue
-        try:
-            stages = json.loads(stages_path.read_text())
-        except (json.JSONDecodeError, OSError):
-            continue
-        if len(stages) < 2:
+        stages = None
+        if stages_path.exists():
+            try:
+                stages = json.loads(stages_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                stages = None
+        if not stages or len(stages) < 2:
+            # No usable ANNE stage data at all for this event - fall back to
+            # the filenames' own Etappe numbering alone, when at least 2
+            # distinct numbers show up (own date as each stage's date, no
+            # ANNE title to attach). Confirmed real: event 4626 ("O-Festival
+            # 2025") - ANNE's own stageCount is 0 for this event despite it
+            # being a real 4-day meet, so every one of its result files
+            # collapsed onto a single synthetic stage; "results-e01" through
+            # "e04" in the filenames is the only stage structure available.
+            enum = [(int(m.group(1)), d) for d in event_docs
+                    if (m := ETAPPE_FILENAME_RE.search(d.get("fileName") or ""))]
+            numbers = sorted({n for n, _ in enum})
+            if len(numbers) >= 2:
+                mapped = {id(d) for _, d in enum}
+                for n, d in enum:
+                    d["_anneStage"] = {"number": n, "date": d.get("docDate"), "title": None}
+                for d in event_docs:
+                    if id(d) not in mapped:
+                        d["_skip"] = True
             continue
 
         def info(i):
@@ -1514,6 +1558,7 @@ def load_legacy_results(cur, events, persons, stage_ids, anne_event_ids):
     canonical = re.compile(r"^\d+-(?:club)?\d+\.json$")
     docs = [json.loads(p.read_text())
             for p in sorted(NORM.glob("*.json")) if canonical.match(p.name)]
+    docs = [d for d in docs if not JUNK_DOC_FILENAME_RE.search(d.get("fileName") or "")]
     docs, _n_dropped = drop_cross_event_duplicate_docs(docs)
     correct_legacy_stage_dates(docs, events)
     map_docs_to_anne_stages(docs)
