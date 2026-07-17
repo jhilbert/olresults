@@ -62,8 +62,18 @@ jobs:
       # history. restore-keys falls back to the most recent prior cache
       # under the same prefix; the unique primary key means a save always
       # happens (there's nothing to "hit" and skip).
+      #
+      # NOT gated to non-push runs, unlike the steps around it: a plain code
+      # push still needs whatever eligibility decisions are already known,
+      # or build_db.py silently skips the whole exclusion pass (the file
+      # just won't exist), wrongly counting every foreign/ineligible
+      # competitor as a real ÖM/ÖSTM contender on that deploy - confirmed
+      # real, this is exactly how Tamas Janko (HUN, no championship
+      # eligibility) ended up shown as the live site's H60- ÖM silver
+      # medalist ahead of Ferri Gassner after a plain push deploy. Only
+      # fetching FRESH decisions from ANNE (the next step) needs staying
+      # push-gated, to avoid hitting the API on every code push.
       - name: Restore championship eligibility cache
-        if: github.event_name != 'push'
         uses: actions/cache/restore@v4
         with:
           path: data/raw/anne/user_eligibility.json
