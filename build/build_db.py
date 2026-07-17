@@ -559,6 +559,13 @@ MEMBER_MAPPING_PATH = PRIVATE / "member_mapping.json"
 # on every local build (when the private CSV is present) and read as the
 # registry source when it isn't.
 MEMBER_INDEX_PATH = ROOT / "data" / "member_index" / "naturfreunde_wien.json"
+# The public, COMMITTED copy of the decision ledger (aliases, internal members,
+# club overrides, splits). Same public-grade content as the private working
+# ledger minus the free-text `split_pending` to-do notes - it references only
+# people already visible in public results and holds no birthdates/gender/
+# non-racers. Written on every local build so it tracks the private ledger,
+# and read as the mapping source on CI where the private one isn't present.
+MEMBER_MAPPING_PUBLIC_PATH = ROOT / "data" / "member_index" / "naturfreunde_wien_mapping.json"
 # Build byproducts (private, regenerated each run): the review worklist and
 # any BoR-vs-DB id conflicts worth a human look.
 PENDING_REVIEW_PATH = PRIVATE / "pending_review.json"
@@ -610,11 +617,13 @@ def load_member_mapping():
     """Load the confirmed alias/non-member ledger. Shape:
         {"aliases": {"<name_key>": <ofol_id>, ...},
          "not_member": ["<name_key>", ...]}
-    Missing file -> empty ledger."""
-    if not MEMBER_MAPPING_PATH.exists():
+    Reads the private working ledger when present (local dev, where it's
+    hand-edited), else the committed public copy (CI). Missing both -> empty."""
+    path = MEMBER_MAPPING_PATH if MEMBER_MAPPING_PATH.exists() else MEMBER_MAPPING_PUBLIC_PATH
+    if not path.exists():
         return {"aliases": {}, "not_member": []}
     try:
-        d = json.loads(MEMBER_MAPPING_PATH.read_text())
+        d = json.loads(path.read_text())
     except (json.JSONDecodeError, OSError):
         return {"aliases": {}, "not_member": []}
     d.setdefault("aliases", {})
@@ -2444,6 +2453,14 @@ def main():
             MEMBER_INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
             MEMBER_INDEX_PATH.write_text(json.dumps(idx, ensure_ascii=False, indent=1))
             print(f"member index: {len(idx)} members with results -> {MEMBER_INDEX_PATH}")
+
+        # Keep the committed public ledger in sync with the private working one
+        # (drop only the free-text split_pending to-do notes). Public-grade, so
+        # CI can apply the same decisions without the private file.
+        if MEMBER_MAPPING_PATH.exists():
+            public_ledger = {k: v for k, v in ledger.items() if k != "split_pending"}
+            MEMBER_MAPPING_PUBLIC_PATH.write_text(
+                json.dumps(public_ledger, ensure_ascii=False, indent=1))
 
     cur.execute("VACUUM")
     con.close()
