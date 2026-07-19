@@ -1,8 +1,13 @@
 name: Sync results and deploy
 
 on:
-  schedule:
-    - cron: "20 2 * * *"   # nightly, 02:20 UTC
+  # Nightly schedule removed: ANNE (anne-api.oefol.at) is firewall-blocked
+  # from GitHub Actions runner IPs (the sync step just times out at the TCP
+  # level, so it fails every night regardless of the API key). The ANNE sync
+  # must run somewhere that can reach ANNE (locally / self-hosted) and push
+  # the refreshed data snapshots instead. Push deploys still work here - they
+  # skip the sync entirely (see the `if: github.event_name != 'push'` guards)
+  # and just rebuild + deploy from committed data.
   workflow_dispatch:
   push:
     branches: [main]
